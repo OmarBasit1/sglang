@@ -61,6 +61,7 @@ from sglang.srt.managers.io_struct import (
 from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
+from sglang.srt.metrics.nvml_power_monitor import start_nvml_power_monitor
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils import (
@@ -697,6 +698,19 @@ def _launch_subprocesses(
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
         server_args.model_path, server_args.tokenizer_path
     )
+
+    # log power, single process for logging power of all visible GPUs
+    power_monitor_process = None
+    if server_args.collect_power_usage:
+            power_monitor_process = mp.Process(
+                target=start_nvml_power_monitor,
+                kwargs={
+                    'interval': 0.01,
+                    'csv_filename': f"{server_args.log_dir}/power_log.csv",
+                    # 'power_queue': power_usage_queue,
+                },
+                daemon=True)
+            power_monitor_process.start()
 
     scheduler_procs = []
     if server_args.dp_size == 1:

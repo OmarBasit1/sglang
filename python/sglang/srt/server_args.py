@@ -282,6 +282,10 @@ class ServerArgs:
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
 
+    # power and logging related
+    collect_power_usage: bool = False
+    log_dir: str = "./logs"
+
     def __post_init__(self):
         # Check deprecated arguments
         def print_deprecated_warning(message: str):
@@ -1952,6 +1956,19 @@ class ServerArgs:
             "--enable-deepep-moe",
             action="store_true",
             help="(Deprecated) Enabling DeepEP MoE implementation for EP MoE.",
+        )
+        # power and logging related
+        parser.add_argument(
+            "--collect-power-usage",
+            action="store_true",
+            default=ServerArgs.collect_power_usage,
+            help="Collect power usage statistics.",
+        )
+        parser.add_argument(
+            "--log-dir",
+            type=str,
+            default=ServerArgs.log_dir,
+            help="The directory to store log files.",
         )
 
     @classmethod
