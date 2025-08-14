@@ -3,6 +3,7 @@ import time
 from collections import defaultdict
 from typing import List, Optional
 
+from sglang.python.sglang.srt.metrics.csv_logger import CSVLogger
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.schedule_policy import PrefillAdder
@@ -55,6 +56,10 @@ class SchedulerMetricsMixin:
             self.kv_event_publisher = EventPublisherFactory.create(
                 kv_events_config, self.attn_dp_rank
             )
+    def init_csv_logger(self, csv_log_path: str):
+        if self.enable_csv_logging:
+            self.csv_logger = CSVLogger(csv_log_path)
+            print(f"Initialized CSV logger at {csv_log_path}")
 
     def log_prefill_stats(
         self,

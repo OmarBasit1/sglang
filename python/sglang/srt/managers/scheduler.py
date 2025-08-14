@@ -235,6 +235,7 @@ class Scheduler(
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.enable_hicache_storage = server_args.hicache_storage_backend is not None
         self.page_size = server_args.page_size
+        self.enable_csv_logging = server_args.enable_csv_logging
 
         self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
             compute_dp_attention_world_info(
@@ -487,6 +488,9 @@ class Scheduler(
         # Init metrics stats
         self.init_metrics(tp_rank, pp_rank, dp_rank)
         self.init_kv_events(server_args.kv_events_config)
+        self.init_csv_logger(csv_log_path=
+                        f"{server_args.log_dir}/perf_metric_{os.getpid()}.csv")
+
 
         # Init disaggregation
         self.disaggregation_mode = DisaggregationMode(

@@ -284,6 +284,7 @@ class ServerArgs:
 
     # power and logging related
     collect_power_usage: bool = False
+    enable_csv_logging: bool = False
     log_dir: str = "./logs"
 
     def __post_init__(self):
@@ -1970,6 +1971,13 @@ class ServerArgs:
             default=ServerArgs.log_dir,
             help="The directory to store log files.",
         )
+        parser.add_argument(
+            "--enable-csv-logging",
+            action="store_true",
+            default=ServerArgs.enable_csv_logging,
+            help="Enable CSV logging.",
+        )
+
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
