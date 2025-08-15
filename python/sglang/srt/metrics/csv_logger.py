@@ -107,8 +107,8 @@ class PrefillCSVLogger(CSVLogger):
         'req_ids_iter',
         'req_precomputed_tokens_iter',
         'req_total_prefilled_tokens',
-        'req_queue_start_time',
-        'last_batch_finished_time'
+        # 'req_queue_start_time',
+        # 'last_batch_finished_time'
     ]
 
     def __init__(self, *args, **kwargs):
@@ -119,6 +119,55 @@ class PrefillCSVLogger(CSVLogger):
 
     def log_prefill(self, stats) -> None:
         perf_dict = {field: getattr(stats, field) for field in self.PREFILL_FIELDS}
+
+        self.csv_buf.append(perf_dict)
+        self.increment_counter_and_maybe_persist_to_disk()
+
+class DecodeStats:
+    def __init__(self):
+        # time at which log was created
+        self.now = 0
+        # batch size of batch that just finished running
+        self.num_running_sys = 0
+        # num reqs left in wait queue
+        self.num_waiting_sys = 0
+        # request IDs in the batch that just finished running
+        self.req_ids_iter = []
+        # precomputed tokens for each request in the batch that just finished running
+        self.req_precomputed_tokens_iter = []
+        # input tokens +1 (generated during prefill), for each request
+        self.req_total_prefilled_tokens = []
+        # time request completed
+        self.req_completed_time = []
+        # time_stats for requests
+        self.req_time_stats = []
+
+
+class DecodeCSVLogger(CSVLogger):
+    """
+    Each row is the engine metrics at time of logging. Each log() adds one row.
+    """
+
+    # For now, we log all tokens of primitive types (int, float).
+    DECODE_FIELDS = [
+        'now',
+        'num_running_sys',
+        'num_waiting_sys',
+        'req_ids_iter',
+        'req_precomputed_tokens_iter',
+        'req_total_prefilled_tokens',
+        # 'req_completed_time',
+        # 'req_time_stats'
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Cumulative number of completed requests
+        self.num_completed_reqs = 0
+
+    def log_decode(self, stats) -> None:
+        perf_dict = {field: getattr(stats, field) for field in self.DECODE_FIELDS}
 
         self.csv_buf.append(perf_dict)
         self.increment_counter_and_maybe_persist_to_disk()

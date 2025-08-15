@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import List, Optional
 
 from sglang.python.sglang.srt.metrics.csv_logger import PrefillCSVLogger, PrefillStats
+from sglang.python.sglang.srt.metrics.csv_logger import DecodeCSVLogger, DecodeStats
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.schedule_policy import PrefillAdder
@@ -60,6 +61,7 @@ class SchedulerMetricsMixin:
         if self.enable_csv_logging:
             self.prefill_csv_logger = PrefillCSVLogger(csv_log_path.replace(".csv", "_prefill.csv"),
                                                        persist_to_disk_every=1)
+            self.decode_csv_logger = DecodeCSVLogger(csv_log_path.replace(".csv", "_decode.csv"))
 
     def log_prefill_stats(
         self,
@@ -147,8 +149,8 @@ class SchedulerMetricsMixin:
                 prefillstats.req_precomputed_tokens_iter.append(req.already_computed)
                 # queue_time_start: time at which the request entered the queue
                 # queue_time_end: time at which batch was formed, (before running the batch)
-                prefillstats.req_queue_start_time.append(req.queue_time_start)
-            prefillstats.last_batch_finished_time = last_batch_time
+            #     prefillstats.req_queue_start_time.append(req.queue_time_start)
+            # prefillstats.last_batch_finished_time = last_batch_time
 
             self.prefill_csv_logger.log_prefill(prefillstats)
 
@@ -227,6 +229,18 @@ class SchedulerMetricsMixin:
             self.metrics_collector.log_stats(self.stats)
             self._emit_kv_metrics()
         self._publish_kv_events()
+
+        if self.enable_csv_logging:
+            decodestats = DecodeStats()
+            decodestats.now = self.last_decode_stats_tic
+            decodestats.num_running_sys = num_running_reqs
+            decodestats.num_waiting_sys = len(self.waiting_queue)
+            for req in batch.reqs:
+                decodestats.req_ids_iter.append(req.rid)
+                decodestats.req_precomputed_tokens_iter.append(len(req.output_ids))
+                decodestats.req_total_prefilled_tokens.append(len(req.origin_input_ids))
+                # decodestats.req_completed_time.append(req.time_stats.completion_time)
+            self.decode_csv_logger.log_decode(decodestats)
 
     def _emit_kv_metrics(self):
         kv_metrics = KvMetrics()
