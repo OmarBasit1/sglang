@@ -3,12 +3,12 @@ import time
 from collections import defaultdict
 from typing import List, Optional
 
-from sglang.python.sglang.srt.metrics.csv_logger import CSVLogger
+from sglang.python.sglang.srt.metrics.csv_logger import PrefillCSVLogger, PrefillStats
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.schedule_policy import PrefillAdder
 from sglang.srt.managers.scheduler import Req, ScheduleBatch
-from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats
+from sglang.srt.metrics.collector import SchedulerMetricsCollector, SchedulerStats, TimeStats
 from sglang.srt.utils import get_bool_env_var
 
 logger = logging.getLogger(__name__)
@@ -58,14 +58,15 @@ class SchedulerMetricsMixin:
             )
     def init_csv_logger(self, csv_log_path: str):
         if self.enable_csv_logging:
-            self.csv_logger = CSVLogger(csv_log_path)
-            print(f"Initialized CSV logger at {csv_log_path}")
+            self.prefill_csv_logger = PrefillCSVLogger(csv_log_path.replace(".csv", "_prefill.csv"),
+                                                       persist_to_disk_every=1)
 
     def log_prefill_stats(
         self,
         adder: PrefillAdder,
         can_run_list: List[Req],
         running_bs: int,
+        last_batch_time: float
     ):
         gap_latency = time.perf_counter() - self.last_prefill_stats_tic
         self.last_prefill_stats_tic = time.perf_counter()
@@ -133,6 +134,23 @@ class SchedulerMetricsMixin:
             self.metrics_collector.log_stats(self.stats)
             self._emit_kv_metrics()
         self._publish_kv_events()
+        if self.enable_csv_logging:
+            prefillstats = PrefillStats()
+            prefillstats.now = self.last_prefill_stats_tic
+            prefillstats.num_running_sys = len(can_run_list)
+            prefillstats.num_running_sys_last_batch = running_bs
+            prefillstats.num_waiting_sys = len(self.waiting_queue)
+            prefillstats.num_prefilled_tokens = adder.log_input_tokens
+            for req in can_run_list:
+                prefillstats.req_ids_iter.append(req.rid)
+                prefillstats.req_total_prefilled_tokens.append(len(req.origin_input_ids))
+                prefillstats.req_precomputed_tokens_iter.append(req.already_computed)
+                # queue_time_start: time at which the request entered the queue
+                # queue_time_end: time at which batch was formed, (before running the batch)
+                prefillstats.req_queue_start_time.append(req.queue_time_start)
+            prefillstats.last_batch_finished_time = last_batch_time
+
+            self.prefill_csv_logger.log_prefill(prefillstats)
 
     def log_decode_stats(
         self, can_run_cuda_graph: bool, running_batch: ScheduleBatch = None

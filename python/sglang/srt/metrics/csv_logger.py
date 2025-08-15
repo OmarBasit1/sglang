@@ -17,7 +17,7 @@ class CSVLogger():
     def __init__(self,
                  filename: str,
                  disable_periodic_persist_to_disk: bool = False,
-                 persist_to_disk_every: int = 100) -> None:
+                 persist_to_disk_every: int = 50) -> None:
         self.filename = Path(filename)
         self.disable_periodic_persist_to_disk = disable_periodic_persist_to_disk
         self.persist_to_disk_every = persist_to_disk_every
@@ -69,8 +69,30 @@ class CSVLogger():
             self._write_to_csv(data_to_write)
         self.executor.shutdown(wait=True)
 
+class PrefillStats:
+    def __init__(self):
+        # time at which log was created
+        self.now = 0
+        # batch size of previous batch
+        self.num_running_sys_last_batch = 0
+        # batch size of batch to be scheduled
+        self.num_running_sys = 0
+        # num reqs left in wait queue
+        self.num_waiting_sys = 0
+        # prefill budget used in batch to be scheduled, can be max chunked-prefill-size
+        self.num_prefilled_tokens = 0
+        # request IDs that will be in the batch to be scheduled
+        self.req_ids_iter = []
+        # precomputed tokens for each request in the batch to be scheduled
+        self.req_precomputed_tokens_iter = []
+        # input tokens +1 (generated during prefill), for each request
+        self.req_total_prefilled_tokens = []
+        # time entered the queue
+        self.req_queue_start_time = []
+        # time last batch finished
+        self.last_batch_finished_time = []
 
-class PerfMetricCSVLogger(CSVLogger):
+class PrefillCSVLogger(CSVLogger):
     """
     Each row is the engine metrics at time of logging. Each log() adds one row.
     """
@@ -78,21 +100,15 @@ class PerfMetricCSVLogger(CSVLogger):
     # For now, we log all tokens of primitive types (int, float).
     PREFILL_FIELDS = [
         'now',
+        'num_running_sys_last_batch',
         'num_running_sys',
         'num_waiting_sys',
-        'num_running_tokens_sys',
-        'num_waiting_tokens_sys',
+        'num_prefilled_tokens',
         'req_ids_iter',
-        'ttft_iter'
-    ]
-
-    DECODE_FIELDS = [
-        'now',
-        'num_running_sys',
-        'num_waiting_sys',
-        'num_running_tokens_sys',
-        'num_waiting_tokens_sys',
-        'req_ids_iter',
+        'req_precomputed_tokens_iter',
+        'req_total_prefilled_tokens',
+        'req_queue_start_time',
+        'last_batch_finished_time'
     ]
 
     def __init__(self, *args, **kwargs):

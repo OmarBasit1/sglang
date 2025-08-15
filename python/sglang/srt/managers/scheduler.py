@@ -236,6 +236,8 @@ class Scheduler(
         self.enable_hicache_storage = server_args.hicache_storage_backend is not None
         self.page_size = server_args.page_size
         self.enable_csv_logging = server_args.enable_csv_logging
+        self.last_batch_type = 'None'
+        self.last_prefill_time = 0.0
 
         self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
             compute_dp_attention_world_info(
@@ -768,32 +770,35 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
+        last_batch_time = time.perf_counter()
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
-            batch = self.get_next_batch_to_run()
+            batch = self.get_next_batch_to_run(last_batch_time)
             self.cur_batch = batch
 
             if batch:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
+                last_batch_time = time.perf_counter()
             else:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
 
             self.last_batch = batch
+            
 
     @DynamicGradMode()
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
-
+        last_batch_time = time.perf_counter()
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
-            batch = self.get_next_batch_to_run()
+            batch = self.get_next_batch_to_run(last_batch_time)
             self.cur_batch = batch
 
             if batch:
@@ -810,6 +815,7 @@ class Scheduler(
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
+                last_batch_time = time.perf_counter()
 
             if self.last_batch:
                 # Process the results of the last batch
@@ -837,6 +843,7 @@ class Scheduler(
         ]
         bids = [None] * self.pp_size
         pp_outputs: Optional[PPProxyTensors] = None
+        last_batch_time = time.perf_counter()
         while True:
             server_is_idle = True
             for mb_id in range(self.pp_size):
@@ -845,7 +852,7 @@ class Scheduler(
 
                 recv_reqs = self.recv_requests()
                 self.process_input_requests(recv_reqs)
-                mbs[mb_id] = self.get_next_batch_to_run()
+                mbs[mb_id] = self.get_next_batch_to_run(last_batch_time)
                 self.running_mbs[mb_id] = self.running_batch
 
                 self.cur_batch = mbs[mb_id]
@@ -959,6 +966,7 @@ class Scheduler(
             if server_is_idle:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
+            last_batch_time = time.perf_counter()
 
     def recv_requests(self) -> List[Req]:
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
@@ -1446,7 +1454,7 @@ class Scheduler(
             swa_evictable_size,
         )
 
-    def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
+    def get_next_batch_to_run(self, last_batch_time: float) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
         chunked_req_to_exclude = set()
         if self.chunked_req:
@@ -1478,7 +1486,11 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
-        new_batch = self.get_new_batch_prefill()
+        if self.last_batch_type == 'Prefill':
+            new_batch = self.get_new_batch_prefill(last_batch_time)
+            self.last_prefill_time = last_batch_time
+        else:
+            new_batch = self.get_new_batch_prefill(self.last_prefill_time)
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 
@@ -1491,6 +1503,7 @@ class Scheduler(
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+            self.last_batch_type = 'Prefill'
         else:
             # Run decode
             if not self.running_batch.is_empty():
@@ -1498,6 +1511,7 @@ class Scheduler(
                 ret = self.running_batch if not self.running_batch.is_empty() else None
             else:
                 ret = None
+            self.last_batch_type = 'Decode'
 
         # Handle DP attention
         if need_dp_attn_preparation:
@@ -1516,7 +1530,7 @@ class Scheduler(
             res = min(res, self.req_to_token_pool.available_size())
         return res
 
-    def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
+    def get_new_batch_prefill(self, last_batch_time) -> Optional[ScheduleBatch]:
         # Check if the grammar is ready in the grammar queue
         if self.grammar_queue:
             self.move_ready_grammar_requests()
@@ -1609,7 +1623,7 @@ class Scheduler(
         if len(can_run_list) == 0:
             return None
 
-        if self.enable_metrics:
+        if self.enable_metrics or self.enable_csv_logging:
             # only record queue time when enable_metrics is True to avoid overhead
             for req in can_run_list:
                 req.queue_time_end = time.perf_counter()
@@ -1627,7 +1641,8 @@ class Scheduler(
 
         # Print stats
         if self.current_scheduler_metrics_enabled():
-            self.log_prefill_stats(adder, can_run_list, running_bs)
+            last_prefill_time = last_batch_time
+            self.log_prefill_stats(adder, can_run_list, running_bs, last_batch_time)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(

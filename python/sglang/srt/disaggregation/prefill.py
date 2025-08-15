@@ -19,6 +19,7 @@ Life cycle of a request in the prefill server
 
 from __future__ import annotations
 
+import time
 import logging
 import threading
 from collections import deque
@@ -267,7 +268,7 @@ class SchedulerDisaggregationPrefillMixin:
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self: Scheduler) -> None:
         """A normal scheduler loop for prefill worker in disaggregation mode."""
-
+        last_batch_time = time.perf_counter()
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -275,7 +276,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
             self.process_prefill_chunk()
-            batch = self.get_new_batch_prefill()
+            batch = self.get_new_batch_prefill(last_batch_time)
 
             if require_mlp_sync(self.server_args):
                 batch = self.prepare_mlp_sync_batch(batch)
@@ -290,16 +291,20 @@ class SchedulerDisaggregationPrefillMixin:
 
             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.self_check_during_idle()
+            else:
+                # update during non-idle batches
+                # this preserves prefill ending times for those requests with idle gaps between them
+                last_batch_time = time.perf_counter()
 
             self.last_batch = batch
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
             # Otherwise, it hangs under high concurrency
-            self.running_batch.batch_is_full = False
+            
 
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler) -> None:
         self.result_queue = deque()
-
+        last_batch_time = time.perf_counter()
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -307,7 +312,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
             self.process_prefill_chunk()
-            batch = self.get_new_batch_prefill()
+            batch = self.get_new_batch_prefill(last_batch_time)
 
             if require_mlp_sync(self.server_args):
                 batch = self.prepare_mlp_sync_batch(batch)
@@ -338,6 +343,10 @@ class SchedulerDisaggregationPrefillMixin:
 
             if batch is None and len(self.disagg_prefill_inflight_queue) == 0:
                 self.self_check_during_idle()
+            else:
+                # update during non-idle batches
+                # this preserves prefill ending times for those requests with idle gaps between them
+                last_batch_time = time.perf_counter()
 
             self.last_batch = batch
             # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
