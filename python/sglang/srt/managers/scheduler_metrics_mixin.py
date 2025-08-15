@@ -70,8 +70,8 @@ class SchedulerMetricsMixin:
         running_bs: int,
         last_batch_time: float
     ):
-        gap_latency = time.perf_counter() - self.last_prefill_stats_tic
-        # self.last_prefill_stats_tic = time.perf_counter()
+        # gap_latency = time.perf_counter() - self.last_prefill_stats_tic
+        self.last_prefill_stats_tic = time.perf_counter()
         # self.last_input_throughput = self.last_prefill_tokens / gap_latency
         # self.last_prefill_tokens = adder.log_input_tokens
 
