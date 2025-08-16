@@ -3,8 +3,8 @@ import time
 from collections import defaultdict
 from typing import List, Optional
 
-from sglang.python.sglang.srt.metrics.csv_logger import PrefillCSVLogger, PrefillStats
-from sglang.python.sglang.srt.metrics.csv_logger import DecodeCSVLogger, DecodeStats
+from sglang.srt.metrics.csv_logger import PrefillCSVLogger, PrefillStats
+from sglang.srt.metrics.csv_logger import DecodeCSVLogger, DecodeStats
 from sglang.srt.disaggregation.kv_events import EventPublisherFactory, KVEventBatch
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers.schedule_policy import PrefillAdder
