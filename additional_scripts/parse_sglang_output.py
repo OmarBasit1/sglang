@@ -142,7 +142,11 @@ def load_logs(expr_dir: Path) -> Tuple[
     # Skip the first two rows, first for test by inference engine, second test by sender
     df_perf_metric_prefill = df_perf_metric_prefill.iloc[2:]  
     # power
-    df_power = pd.read_csv(expr_dir / f'power_log_{pid}.csv')
+    # Try to find the power log file, regardless of pid
+    power_log_files = list(expr_dir.glob('power_log_*.csv'))
+    if not power_log_files:
+        raise FileNotFoundError("No power_log_*.csv file found in the directory")
+    df_power = pd.read_csv(power_log_files[0])
 
     df_perf_metric_decode = df_perf_metric_decode.dropna()
     df_perf_metric_prefill = df_perf_metric_prefill.dropna()
