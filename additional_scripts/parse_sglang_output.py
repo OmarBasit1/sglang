@@ -69,9 +69,6 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
     for req_id_row in df_perf_metric_prefill_steady['req_ids_iter']:
         req_ids = list(eval(req_id_row))
         unique_req_ids.update(req_ids)
-    for req_id_row in df_perf_metric_decode_steady['req_ids_iter']:
-        req_ids = list(eval(req_id_row))
-        unique_req_ids.update(req_ids)
 
     id_decode_prefilled_dict = dict()
     for req_id_row, req_precomputed_tokens_row, req_total_prefilled_tokens_row in df_perf_metric_decode_steady[['req_ids_iter', 'req_precomputed_tokens_iter', 'req_total_prefilled_tokens']].itertuples(index=False, name=None):
