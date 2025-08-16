@@ -69,7 +69,23 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
     for req_id_row in df_perf_metric_prefill_steady['req_ids_iter']:
         req_ids = list(eval(req_id_row))
         unique_req_ids.update(req_ids)
+    unique_req_ids = {req_id for req_id in unique_req_ids if "HEALTH" not in str(req_id)}
 
+    # # ttft calculated done as a difference of time req entered queue with time batch finished
+    # id_start_time_end_time_dict = dict()
+    # last_rows_req_ids = []
+    # for req_id_row, req_queue_start_time_row, last_batch_finished_time_row in df_perf_metric_prefill_steady[['req_ids_iter', 'req_queue_start_time', 'last_batch_finished_time']].itertuples(index=False, name=None):
+    #     req_ids = list(eval(req_id_row))
+    #     req_queue_start_time = list(eval(req_queue_start_time_row))
+    #     for id, start_time in zip(req_ids, req_queue_start_time):
+    #         id_start_time_end_time_dict[id] = (start_time, 0.0)
+    #     for last_req_id in last_rows_req_ids:
+    #         id_start_time_end_time_dict[last_req_id] = (id_start_time_end_time_dict[last_req_id][0], last_batch_finished_time_row)
+    #     last_rows_req_ids = req_ids
+    # id_start_time_end_time_dict = {k: v for k, v in id_start_time_end_time_dict.items() if "HEALTH" not in str(k)}
+    # ttft_list = [end_time - start_time if end_time > start_time else 0 for start_time, end_time in id_start_time_end_time_dict.values()]
+
+    # decode df has info about both input tokens and generated tokens
     id_decode_prefilled_dict = dict()
     for req_id_row, req_precomputed_tokens_row, req_total_prefilled_tokens_row in df_perf_metric_decode_steady[['req_ids_iter', 'req_precomputed_tokens_iter', 'req_total_prefilled_tokens']].itertuples(index=False, name=None):
         req_ids = list(eval(req_id_row))
@@ -93,6 +109,8 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
     return PerfStats(
         num_requests=len(unique_req_ids),
         throughput_rps=len(unique_req_ids) / duration,
+        # ttft_mean=float(np.mean(ttft_list)),
+        # ttft_p99=float(percentile_or_nan(ttft_list, q=99)),
         power_w=power_w,
         freq_mhz_mean=float(np.mean(freq_arr_list)),
         freq_mhz_p10=float(percentile_or_nan(
@@ -130,15 +148,8 @@ def load_logs(expr_dir: Path) -> Tuple[
         raise FileNotFoundError()
     # decode
     df_perf_metric_decode = pd.read_csv(inference_csv_path)
-    # Extract the numbers in place of * in 'perf_metric_*_decode.csv'
-    match = re.search(r'perf_metric_(\d+)_decode\.csv', inference_csv_path.name)
-    if match:
-        pid = int(match.group(1))
-    else:
-        raise ValueError("Could not extract PID from filename")
-    # prefill
-    inference_prefill_csv_path = next(expr_dir.glob(f'perf_metric_{pid}_prefill.csv'))
-    df_perf_metric_prefill = pd.read_csv(inference_prefill_csv_path)
+    inference_prefill_csv_path = list(expr_dir.glob('perf_metric_*_prefill.csv'))
+    df_perf_metric_prefill = pd.read_csv(inference_prefill_csv_path[0])
     # Skip the first two rows, first for test by inference engine, second test by sender
     df_perf_metric_prefill = df_perf_metric_prefill.iloc[2:]  
     # power
@@ -158,7 +169,7 @@ def extract_steady_region(
     df_perf_metric_decode: pd.DataFrame,
     df_perf_metric_prefill: pd.DataFrame,
     df_power: pd.DataFrame,
-    clip_minutes: float = 60.0
+    clip_minutes: float = 00.0
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Drop the first minute of data from df_perf_metric_*
