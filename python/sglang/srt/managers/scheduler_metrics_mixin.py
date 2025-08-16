@@ -71,7 +71,7 @@ class SchedulerMetricsMixin:
         last_batch_time: float
     ):
         # gap_latency = time.perf_counter() - self.last_prefill_stats_tic
-        self.last_prefill_stats_tic = time.perf_counter()
+        # self.last_prefill_stats_tic = time.perf_counter()
         # self.last_input_throughput = self.last_prefill_tokens / gap_latency
         # self.last_prefill_tokens = adder.log_input_tokens
 
@@ -138,7 +138,7 @@ class SchedulerMetricsMixin:
         self._publish_kv_events()
         if self.enable_csv_logging:
             prefillstats = PrefillStats()
-            prefillstats.now = self.last_prefill_stats_tic
+            prefillstats.now = time.time()
             prefillstats.num_running_sys = len(can_run_list)
             prefillstats.num_running_sys_last_batch = running_bs
             prefillstats.num_waiting_sys = len(self.waiting_queue)
@@ -160,7 +160,7 @@ class SchedulerMetricsMixin:
         batch = running_batch or self.running_batch
 
         # gap_latency = time.perf_counter() - self.last_decode_stats_tic
-        self.last_decode_stats_tic = time.perf_counter()
+        # self.last_decode_stats_tic = time.perf_counter()
         # self.last_gen_throughput = self.num_generated_tokens / gap_latency
         # self.num_generated_tokens = 0
         num_running_reqs = len(batch.reqs)
@@ -232,7 +232,7 @@ class SchedulerMetricsMixin:
 
         if self.enable_csv_logging:
             decodestats = DecodeStats()
-            decodestats.now = self.last_decode_stats_tic
+            decodestats.now = time.time()
             decodestats.num_running_sys = num_running_reqs
             decodestats.num_waiting_sys = len(self.waiting_queue)
             for req in batch.reqs:
