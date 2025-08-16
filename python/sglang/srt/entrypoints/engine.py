@@ -706,7 +706,7 @@ def _launch_subprocesses(
                 target=start_nvml_power_monitor,
                 kwargs={
                     'interval': 0.01,
-                    'csv_filename': f"{server_args.log_dir}/power_log.csv",
+                    'csv_filename': f"{server_args.log_dir}/power_log_{os.getpid()}.csv",
                     # 'power_queue': power_usage_queue,
                 },
                 daemon=True)
