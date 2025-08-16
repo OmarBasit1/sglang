@@ -145,8 +145,8 @@ def load_logs(expr_dir: Path) -> Tuple[
     # Skip the first two rows, first for test by inference engine, second test by sender
     df_perf_metric_prefill = df_perf_metric_prefill.iloc[2:]  
     # power
-    df_power = pd.read_csv(expr_dir / 'power_log.csv')
-    
+    df_power = pd.read_csv(expr_dir / f'power_log_{pid}.csv')
+
     df_perf_metric_decode = df_perf_metric_decode.dropna()
     df_perf_metric_prefill = df_perf_metric_prefill.dropna()
 
