@@ -51,21 +51,23 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
     perfstats_list = []
     for k, v in raw_logs_dict_steady.items():
         decode, prefill, power = v
-        perfstats = calc_perf_stats_single_instance(decode, prefill, power)
+        perfstats = calc_perf_stats_single_instance(k, decode, prefill, power)
         perfstats_list.append((k, perfstats))
 
-    total_requests = sum(p.num_requests for k, p in perfstats_list if "prefill" in k) if perfstats_list else 0
-    total_duration = max(p.expr_duration_s for _, p in perfstats_list) if perfstats_list else 1
-    total_decode = sum(p.num_tokens_decoded for k, p in perfstats_list if "decode" in k) if perfstats_list else 0
-    total_prefill = sum(p.num_tokens_prefilled for k, p in perfstats_list if "decode" in k) if perfstats_list else 0
-    total_generated = sum(p.generated_tokens_per_second for k, p in perfstats_list if "decode" in k) if perfstats_list else 0
-    total_input = sum(p.input_tokens_per_second for k, p in perfstats_list if "decode" in k) if perfstats_list else 0
+    total_requests = sum(p.num_requests for k, p in perfstats_list if "prefill" in k)
+    total_duration_prefill = max(p.expr_duration_s for k, p in perfstats_list if "prefill" in k)
+    total_duration = max(p.expr_duration_s for _, p in perfstats_list)
+    total_energy = sum(p.energy_j for _, p in perfstats_list)
+    total_decode = sum(p.num_tokens_decoded for k, p in perfstats_list if "decode" in k)
+    total_prefill = sum(p.num_tokens_prefilled for k, p in perfstats_list if "decode" in k)
+    total_generated = sum(p.generated_tokens_per_second for k, p in perfstats_list if "decode" in k)
+    total_input = sum(p.input_tokens_per_second for k, p in perfstats_list if "prefill" in k)
 
     total_perfstats = PerfStats(
-        throughput_rps=total_requests/total_duration if total_duration > 0 else 0,
-        power_w=np.mean(p.power_w for _, p in perfstats_list) / len(perfstats_list) if perfstats_list else 0,
-        energy_j=sum(p.energy_j for _, p in perfstats_list) / len(perfstats_list) if perfstats_list else 0,
-        energy_per_token=(sum(p.energy_j for _, p in perfstats_list) / len(perfstats_list) if perfstats_list else 0)/(total_decode+total_prefill),
+        throughput_rps=total_requests / total_duration_prefill,
+        power_w=total_energy / total_duration,
+        energy_j=total_energy,
+        energy_per_token=total_energy / (total_decode + total_prefill),
         freq_mhz_mean=0,
         freq_mhz_p10=0,
         freq_mhz_p50=0,
@@ -74,14 +76,16 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
         num_requests=total_requests,
         num_tokens_decoded=total_decode,
         num_tokens_prefilled=total_prefill,
-        generated_tokens_per_second=total_generated / total_duration if total_duration > 0 else 0,
-        input_tokens_per_second=total_input / total_duration if total_duration > 0 else 0,
+        generated_tokens_per_second=total_generated,
+        input_tokens_per_second=total_input
     )
+    perfstats_list.append(('total', total_perfstats))
     return perfstats_list
 
 
-def calc_perf_stats_single_instance(df_perf_metric_prefill_steady: pd.DataFrame, 
+def calc_perf_stats_single_instance(root_name: str,
                                     df_perf_metric_decode_steady: pd.DataFrame,
+                                    df_perf_metric_prefill_steady: pd.DataFrame,
                                     df_power_steady: pd.DataFrame) -> PerfStats:
     
     # Calculate duration using min and max from both decode and prefill dfs
@@ -107,8 +111,9 @@ def calc_perf_stats_single_instance(df_perf_metric_prefill_steady: pd.DataFrame,
     power_w = energy_j_steady / duration
 
     # unique request IDs = num requests served
+    # prefer prefill
     unique_req_ids = set()
-    if not df_perf_metric_prefill_steady.empty:
+    if "prefill" in root_name:
         for req_id_row in df_perf_metric_prefill_steady['req_ids_iter']:
             req_ids = list(eval(req_id_row))
             unique_req_ids.update(req_ids)
@@ -116,7 +121,7 @@ def calc_perf_stats_single_instance(df_perf_metric_prefill_steady: pd.DataFrame,
         for req_id_row in df_perf_metric_decode_steady['req_ids_iter']:
             req_ids = list(eval(req_id_row))
             unique_req_ids.update(req_ids)
-    unique_req_ids = {req_id for req_id in unique_req_ids if "HEALTH" not in str(req_id)}
+    unique_req_ids = {req_id for req_id in unique_req_ids if "HEALTH_CHECK" not in str(req_id)}
 
     # # ttft calculated done as a difference of time req entered queue with time batch finished
     # id_start_time_end_time_dict = dict()
@@ -129,12 +134,12 @@ def calc_perf_stats_single_instance(df_perf_metric_prefill_steady: pd.DataFrame,
     #     for last_req_id in last_rows_req_ids:
     #         id_start_time_end_time_dict[last_req_id] = (id_start_time_end_time_dict[last_req_id][0], last_batch_finished_time_row)
     #     last_rows_req_ids = req_ids
-    # id_start_time_end_time_dict = {k: v for k, v in id_start_time_end_time_dict.items() if "HEALTH" not in str(k)}
+    # id_start_time_end_time_dict = {k: v for k, v in id_start_time_end_time_dict.items() if "HEALTH_CHECK" not in str(k)}
     # ttft_list = [end_time - start_time if end_time > start_time else 0 for start_time, end_time in id_start_time_end_time_dict.values()]
 
     # decode df has info about both input tokens and generated tokens
     id_decode_prefilled_dict = dict()
-    if not df_perf_metric_decode_steady.empty:
+    if "decode" in root_name:
         for req_id_row, req_precomputed_tokens_row, req_total_prefilled_tokens_row in df_perf_metric_decode_steady[['req_ids_iter', 'req_precomputed_tokens_iter', 'req_total_prefilled_tokens']].itertuples(index=False, name=None):
             req_ids = list(eval(req_id_row))
             req_precomputed_tokens = list(eval(req_precomputed_tokens_row))
@@ -161,8 +166,6 @@ def calc_perf_stats_single_instance(df_perf_metric_prefill_steady: pd.DataFrame,
         total_prefilled = sum(prefilled for _, prefilled in id_decode_prefilled_dict.values())
         total_input = sum(prefilled - 1 for _, prefilled in id_decode_prefilled_dict.values())
         total_generated = sum(prefilled for _, prefilled in id_decode_prefilled_dict.values()) - total_input
-    
-
     
 
     return PerfStats(
@@ -226,7 +229,8 @@ def load_logs_prefill_decode_power_logs(expr_dir: Path) -> Tuple[
     if len(prefill_csv_paths) > 1:
         raise FileNotFoundError("More than one perf_metric_*_prefill.csv file found in the directory")
     if prefill_csv_paths:
-        df_perf_metric_prefill = pd.read_csv(prefill_csv_paths[0]).iloc[2:]
+        df_perf_metric_prefill = pd.read_csv(prefill_csv_paths[0])
+        df_perf_metric_prefill = df_perf_metric_prefill[~df_perf_metric_prefill['req_ids_iter'].astype(str).str.contains('HEALTH_CHECK')].iloc[2:]
     else:
         df_perf_metric_prefill = pd.DataFrame()
 
@@ -337,9 +341,12 @@ if __name__ == '__main__':
         if not any(child.is_dir() for child in expr_dir.iterdir()):
             continue
         print('expr_dir: ', expr_dir)
-        df_stats.append({
-            'expr_dir': expr_dir.name,
-            **asdict(calc_perf_stats(expr_dir))
-        })
+        perfstats_list = calc_perf_stats(expr_dir)
+        for key, perfstats in perfstats_list:
+            df_stats.append({
+                'expr_dir': expr_dir.name,
+                'instance': key,
+                **asdict(perfstats)
+            })
     df_stats = pd.DataFrame(df_stats)
     df_stats.to_csv(expr_root / 'metrics.csv', index=False)
