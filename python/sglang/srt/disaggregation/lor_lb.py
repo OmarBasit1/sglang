@@ -74,17 +74,17 @@ class LorBalancer:
         if new_decode_server not in self.decode_cnt.keys():
             self.decode_cnt[new_decode_server] = 0
 
-    def select_pair(self):
+    async def select_pair(self):
         # TODO: return some message instead of panic
         assert len(self.prefill_configs) > 0, "No prefill servers available"
         assert len(self.decode_servers) > 0, "No decode servers available"
 
-        with self.prefill_cnt_lock:
+        async with self.prefill_cnt_lock:
             prefill_server = min(self.prefill_cnt, key=self.prefill_cnt.get)
             self.prefill_cnt[prefill_server] += 1
         bootstrap_port = self.prefill_bootstrap_map[prefill_server]
-        with self.decode_cnt_lock:
-            decode_server = min(self.decode_cnt, self.decode_cnt.get)
+        async with self.decode_cnt_lock:
+            decode_server = min(self.decode_cnt, key=self.decode_cnt.get)
             self.decode_cnt[decode_server] += 1
 
         return prefill_server, bootstrap_port, decode_server
@@ -121,11 +121,11 @@ class LorBalancer:
                         )
             else:
                 await prefill_response.json()
-                with self.prefill_cnt_lock:
+                async with self.prefill_cnt_lock:
                     self.prefill_cnt[prefill_server] -= 1
 
                 ret_json = await decode_response.json()
-                with self.decode_cnt_lock:
+                async with self.decode_cnt_lock:
                     self.decode_cnt[decode_server] -= 1
 
             return ORJSONResponse(
@@ -157,7 +157,7 @@ class LorBalancer:
                     async for chunk in prefill_response.content:
                         prefill_chunks.append(chunk)
 
-                    with self.prefill_cnt_lock:
+                    async with self.prefill_cnt_lock:
                         self.prefill_cnt[prefill_server] -= 1
                     
                     first_prefill_chunk = (
@@ -189,7 +189,7 @@ class LorBalancer:
                     async for _ in prefill_response.content:
                         pass
 
-                    with self.prefill_cnt_lock:
+                    async with self.prefill_cnt_lock:
                         self.prefill_cnt[prefill_server] -= 1
 
                     async for chunk in decode_response.content.iter_chunked(
@@ -197,7 +197,7 @@ class LorBalancer:
                     ):
                         yield chunk
                 
-                with self.decode_cnt_lock:
+                async with self.decode_cnt_lock:
                     self.decode_cnt[decode_server] -= 1
 
         return StreamingResponse(
@@ -304,7 +304,7 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
-    prefill_server, bootstrap_port, decode_server = load_balancer.select_pair()
+    prefill_server, bootstrap_port, decode_server = await load_balancer.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
     parsed_url = urllib.parse.urlparse(prefill_server)

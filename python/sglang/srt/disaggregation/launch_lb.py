@@ -102,8 +102,8 @@ class LBArgs:
     def __post_init__(self):
         if not self.rust_lb:
             assert (
-                self.policy == "random"
-            ), "Only random policy is supported for Python load balancer"
+                self.policy in {"random", "lor"}
+            ), "Only random and lor policy is supported for Python load balancer"
 
 
 def main():
