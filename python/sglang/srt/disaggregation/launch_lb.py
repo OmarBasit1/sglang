@@ -1,9 +1,6 @@
 import argparse
 import dataclasses
 
-from sglang.srt.disaggregation.mini_lb import PrefillConfig, run
-
-
 @dataclasses.dataclass
 class LBArgs:
     rust_lb: bool = False
@@ -38,7 +35,7 @@ class LBArgs:
             "--policy",
             type=str,
             default=LBArgs.policy,
-            choices=["random", "po2"],
+            choices=["random", "po2", "lor"],
             help=f"Policy to use for load balancing (default: {LBArgs.policy})",
         )
         parser.add_argument(
@@ -116,6 +113,11 @@ def main():
     LBArgs.add_cli_args(parser)
     args = parser.parse_args()
     lb_args = LBArgs.from_cli_args(args)
+
+    if lb_args.policy == "lor":
+        from sglang.srt.disaggregation.lor_lb import PrefillConfig, run
+    else:
+        from python.sglang.srt.disaggregation.mini_lb import PrefillConfig, run
 
     prefill_configs = [PrefillConfig(url, port) for url, port in lb_args.prefill_infos]
     run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port)
