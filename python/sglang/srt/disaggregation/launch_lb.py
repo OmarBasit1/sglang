@@ -117,7 +117,7 @@ def main():
     if lb_args.policy == "lor":
         from sglang.srt.disaggregation.lor_lb import PrefillConfig, run
     else:
-        from python.sglang.srt.disaggregation.mini_lb import PrefillConfig, run
+        from sglang.srt.disaggregation.mini_lb import PrefillConfig, run
 
     prefill_configs = [PrefillConfig(url, port) for url, port in lb_args.prefill_infos]
     run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port)
