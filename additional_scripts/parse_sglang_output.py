@@ -16,8 +16,8 @@ import re
 @dataclass
 class PerfStats:
     throughput_rps: float   # Requests per second
-    # ttft_mean: float
-    # ttft_p99: float
+    ttft_mean: float
+    ttft_p99: float
     # tbt_mean_of_mean: float
     # tbt_p99_of_mean: float
     # tbt_old_mean: float
@@ -65,6 +65,8 @@ def calc_perf_stats(expr_dir: Path) -> PerfStats:
 
     total_perfstats = PerfStats(
         throughput_rps=total_requests / total_duration_prefill,
+        ttft_mean=0,
+        ttft_p99=0,
         power_w=total_energy / total_duration,
         energy_j=total_energy,
         energy_per_token=total_energy / (total_decode + total_prefill),
@@ -123,19 +125,18 @@ def calc_perf_stats_single_instance(root_name: str,
             unique_req_ids.update(req_ids)
     unique_req_ids = {req_id for req_id in unique_req_ids if "HEALTH_CHECK" not in str(req_id)}
 
-    # # ttft calculated done as a difference of time req entered queue with time batch finished
-    # id_start_time_end_time_dict = dict()
-    # last_rows_req_ids = []
-    # for req_id_row, req_queue_start_time_row, last_batch_finished_time_row in df_perf_metric_prefill_steady[['req_ids_iter', 'req_queue_start_time', 'last_batch_finished_time']].itertuples(index=False, name=None):
-    #     req_ids = list(eval(req_id_row))
-    #     req_queue_start_time = list(eval(req_queue_start_time_row))
-    #     for id, start_time in zip(req_ids, req_queue_start_time):
-    #         id_start_time_end_time_dict[id] = (start_time, 0.0)
-    #     for last_req_id in last_rows_req_ids:
-    #         id_start_time_end_time_dict[last_req_id] = (id_start_time_end_time_dict[last_req_id][0], last_batch_finished_time_row)
-    #     last_rows_req_ids = req_ids
-    # id_start_time_end_time_dict = {k: v for k, v in id_start_time_end_time_dict.items() if "HEALTH_CHECK" not in str(k)}
-    # ttft_list = [end_time - start_time if end_time > start_time else 0 for start_time, end_time in id_start_time_end_time_dict.values()]
+    # ttft calculated done as a difference of time req entered queue with time batch finished
+    id_start_time_end_time_dict = dict()
+    last_rows_req_ids = []
+    for req_id_row, req_start_time_row, last_batch_finished_time_row in df_perf_metric_prefill_steady[['req_ids_iter', 'req_queue_start_time', 'last_batch_finished_time']].itertuples(index=False, name=None):
+        req_ids = list(eval(req_id_row))
+        req_start_time = list(eval(req_start_time_row))
+        for id, start_time in zip(req_ids, req_start_time):
+            id_start_time_end_time_dict[id] = (start_time, 0.0)
+        for last_req_id in last_rows_req_ids:
+            id_start_time_end_time_dict[last_req_id] = (id_start_time_end_time_dict[last_req_id][0], last_batch_finished_time_row)
+        last_rows_req_ids = req_ids
+    ttft_list = [end_time - start_time if end_time > start_time else 0 for start_time, end_time in id_start_time_end_time_dict.values()]
 
     # decode df has info about both input tokens and generated tokens
     id_decode_prefilled_dict = dict()
@@ -171,8 +172,8 @@ def calc_perf_stats_single_instance(root_name: str,
     return PerfStats(
         num_requests=len(unique_req_ids),
         throughput_rps=len(unique_req_ids) / duration,
-        # ttft_mean=float(np.mean(ttft_list)),
-        # ttft_p99=float(percentile_or_nan(ttft_list, q=99)),
+        ttft_mean=float(np.mean(ttft_list)),
+        ttft_p99=float(percentile_or_nan(ttft_list, q=99)),
         power_w=power_w,
         energy_j=energy_j_steady,
         freq_mhz_mean=float(np.mean(freq_arr_list)),
@@ -220,7 +221,7 @@ def load_logs_prefill_decode_power_logs(expr_dir: Path) -> Tuple[
     if len(decode_csv_paths) > 1:
         raise FileNotFoundError("More than one perf_metric_*_decode.csv file found in the directory")
     if decode_csv_paths:
-        df_perf_metric_decode = pd.read_csv(decode_csv_paths[0])
+        df_perf_metric_decode = pd.read_csv(decode_csv_paths[0]).iloc[8:]
     else:
         df_perf_metric_decode = pd.DataFrame()
 

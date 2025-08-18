@@ -149,8 +149,8 @@ class SchedulerMetricsMixin:
                 prefillstats.req_precomputed_tokens_iter.append(req.already_computed)
                 # queue_time_start: time at which the request entered the queue
                 # queue_time_end: time at which batch was formed, (before running the batch)
-            #     prefillstats.req_queue_start_time.append(req.queue_time_start)
-            # prefillstats.last_batch_finished_time = last_batch_time
+                prefillstats.req_queue_start_time.append(req.queue_time_start)
+            prefillstats.last_batch_finished_time = last_batch_time
 
             self.prefill_csv_logger.log_prefill(prefillstats)
 

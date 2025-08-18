@@ -815,7 +815,6 @@ class Scheduler(
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
-                last_batch_time = time.perf_counter()
 
             if self.last_batch:
                 # Process the results of the last batch
@@ -827,6 +826,7 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+                last_batch_time = time.perf_counter()
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()

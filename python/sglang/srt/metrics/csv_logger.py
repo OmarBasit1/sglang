@@ -107,8 +107,8 @@ class PrefillCSVLogger(CSVLogger):
         'req_ids_iter',
         'req_precomputed_tokens_iter',
         'req_total_prefilled_tokens',
-        # 'req_queue_start_time',
-        # 'last_batch_finished_time'
+        'req_queue_start_time',
+        'last_batch_finished_time'
     ]
 
     def __init__(self, *args, **kwargs):
