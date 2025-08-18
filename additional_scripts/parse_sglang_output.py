@@ -220,7 +220,7 @@ def load_logs_prefill_decode_power_logs(expr_dir: Path) -> Tuple[
     if len(decode_csv_paths) > 1:
         raise FileNotFoundError("More than one perf_metric_*_decode.csv file found in the directory")
     if decode_csv_paths:
-        df_perf_metric_decode = pd.read_csv(decode_csv_paths[0])
+        df_perf_metric_decode = pd.read_csv(decode_csv_paths[0]).iloc[8:]
     else:
         df_perf_metric_decode = pd.DataFrame()
 
