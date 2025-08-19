@@ -215,10 +215,24 @@ class Qwen72BModelConfig(QwenModelConfig):
     
 @dataclass
 class OPT66BModelConfig(Llama2ModelConfig):
-    num_layers: int = 64
-    num_q_heads: int = 72
-    num_kv_heads: int = 72   
-    embedding_dim: int = 9216
+    # num_layers: int = 64
+    # num_q_heads: int = 72
+    # num_kv_heads: int = 72   
+    # embedding_dim: int = 9216
+    # mlp_hidden_dim: int = 36864
+    # max_position_embeddings: int = 2048
+    # use_gated_mlp: bool = False
+    # use_bias: bool = False
+    # use_qkv_bias: bool = False
+    # activation: ActivationType = ActivationType.GELU   
+    # norm: NormType = NormType.LAYER_NORM              
+    # post_attn_norm: bool = False                       
+    # vocab_size: int = 50272
+    
+    num_layers: int = 80
+    num_q_heads: int = 64
+    num_kv_heads: int = 64
+    embedding_dim: int = 8192
     mlp_hidden_dim: int = 36864
     max_position_embeddings: int = 2048
     use_gated_mlp: bool = False
