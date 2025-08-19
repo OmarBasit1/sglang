@@ -46,7 +46,7 @@ class Simulator:
         )
 
         self._init_event_queue()
-        atexit.register(self._write_output)
+    # Removed atexit.register(self._write_output) to avoid RuntimeError during shutdown
 
     @property
     def scheduler(self) -> BaseGlobalScheduler:

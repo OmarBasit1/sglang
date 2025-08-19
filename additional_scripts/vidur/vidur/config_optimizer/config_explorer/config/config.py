@@ -37,14 +37,15 @@ class TraceConfig:
         return {
             "request_generator_config_type": "synthetic",
             "length_generator_config_type": "trace",
-            "interval_generator_config_type": "poisson",
-            "synthetic_request_generator_config_max_tokens": self.max_seq_len,
+            "interval_generator_config_type": "trace",
+            # "synthetic_request_generator_config_max_tokens": self.max_seq_len,
             "trace_request_length_generator_config_max_tokens": self.max_seq_len,
             "zipf_request_length_generator_config_max_tokens": self.max_seq_len,
             "uniform_request_length_generator_config_max_tokens": self.max_seq_len,
             "fixed_request_length_generator_config_max_tokens": self.max_seq_len,
             "trace_request_generator_config_max_tokens": self.max_seq_len,
             "trace_request_length_generator_config_trace_file": self.trace_file,
+            "trace_request_interval_generator_config_trace_file": self.trace_file,
             "trace_request_length_generator_config_prefill_scale_factor": 1,
             "trace_request_length_generator_config_decode_scale_factor": 1,
             "synthetic_request_generator_config_num_requests": self.num_requests,
@@ -64,6 +65,7 @@ class ClusterConfig:
     def to_config_dict(self):
         return {
             "replica_config_device": self.device,
+            "replica_config_network_device": "a100_dgx",
         }
 
 
@@ -91,6 +93,7 @@ class SchedulerConfig:
         return {
             "replica_scheduler_config_type": "sarathi",
             "sarathi_scheduler_config_chunk_size": self.chunk_size,
+            "global_scheduler_config_type": "lor"
         }
 
 
