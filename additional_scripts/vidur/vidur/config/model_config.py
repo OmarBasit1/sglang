@@ -214,25 +214,21 @@ class Qwen72BModelConfig(QwenModelConfig):
         return "Qwen/Qwen-72B"
     
 @dataclass
-class OPT66BModelConfig(BaseModelConfig):
+class OPT66BModelConfig(Llama2ModelConfig):
     num_layers: int = 64
     num_q_heads: int = 72
-    num_kv_heads: int = 72
+    num_kv_heads: int = 72   
     embedding_dim: int = 9216
     mlp_hidden_dim: int = 36864
     max_position_embeddings: int = 2048
     use_gated_mlp: bool = False
-    use_bias: bool = True
-    use_qkv_bias: bool = True
-    activation: ActivationType = ActivationType.GELU
-    norm: NormType = NormType.LAYER_NORM
-    post_attn_norm: bool = True
+    use_bias: bool = False
+    use_qkv_bias: bool = False
+    activation: ActivationType = ActivationType.GELU   
+    norm: NormType = NormType.LAYER_NORM              
+    post_attn_norm: bool = False                       
     vocab_size: int = 50272
-    is_neox_style: Optional[bool] = True
-    rope_theta: Optional[float] = None
-    rope_scaling: Optional[Dict[str, Any]] = None
-    partial_rotary_factor: float = 1.0
-    no_tensor_parallel: bool = False
+
 
     @staticmethod
     def get_name():
