@@ -23,6 +23,8 @@ class BatchStageArrivalEvent(BaseEvent):
     ) -> List[BaseEvent]:
         from vidur.events.replica_stage_schedule_event import ReplicaStageScheduleEvent
 
+        self._batch.on_inference_start(self.time)
+
         scheduler.get_replica_stage_scheduler(
             self._replica_id, self._stage_id
         ).add_batch(self._batch)

@@ -39,3 +39,23 @@ class BatchEndEvent(BaseEvent):
             "event_type": self.event_type,
             "batch_id": self._batch.id,
         }
+    
+    def to_chrome_trace(self) -> List[dict]:
+        chrome_traces = []
+        for req in self._batch.completed_requests:
+            chrome_traces.append({
+                "name": "request_end",
+                "ph": "i",
+                "ts": self.time * 1e6,
+                "pid": 0,
+                "tid": 0,
+                "args": {
+                    'request_id': req.id,
+                    'arrived_at': req.arrived_at,
+                    'prefill_completed_at': req.prefill_completed_at,
+                    'completed_at': req.completed_at,
+                    'num_prefill_tokens': req.num_prefill_tokens,
+                    'num_decode_tokens': req.num_decode_tokens,
+                }
+            })
+        return chrome_traces if len(chrome_traces) > 0 else None

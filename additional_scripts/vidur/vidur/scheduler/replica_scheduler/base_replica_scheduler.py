@@ -1,5 +1,8 @@
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import List
+import numpy as np
+from typing import Optional
 
 from vidur.config import (
     BaseReplicaSchedulerConfig,
@@ -63,6 +66,11 @@ class BaseReplicaScheduler(ABC):
             )
             for stage_id in range(num_stages)
         }
+
+        self.outstanding_batches: deque[Batch] = deque()
+        self._scheduler_is_running = False
+        self._scheduler_last_stopped = 0.0
+        self._last_returned_batch: Optional[Batch] = None
 
     @property
     def num_pending_requests(self) -> int:
@@ -134,12 +142,86 @@ class BaseReplicaScheduler(ABC):
     def _get_next_batch(self) -> Batch:
         pass
 
-    def on_schedule(self) -> List[Batch]:
-        scheduled_batches = []
+    def on_schedule(self, current_time) -> List[Batch]:
+        if self._num_running_batches == self._num_stages:
+            # Scheduler is excessively triggered by new request arrival
+            assert self._scheduler_is_running
+            return []
+
+        self._scheduler_is_running = True
+
+        # Record num running requests before actually performing the
+        # scheduling, otherwise requests will be taken out of the running queue
+        if hasattr(self, 'num_running_requests'):
+            running_queue_len = self.num_running_requests
+        else:
+            running_queue_len = 0
+
+        # If true, it means there's nothing to schedule, in which case the
+        # scheduler will stop running until the next request arrives
+        scheduler_will_stop = True
+
+        scheduled_batches: List[Batch] = []
         while self._num_running_batches < self._num_stages:
+            scheduler_has_ticked = True
             batch = self._get_next_batch()
             if not batch:
                 break
+            scheduler_will_stop = False
             scheduled_batches.append(batch)
+            self.outstanding_batches.append(batch)
             self._num_running_batches += 1
+
+        # If scheduler_will_stop, meaning the scheduled batch is empty, don't
+        # update last batch stats, so that the stats can be picked up on the
+        # first iteration the scheduler resumes running
+        if scheduler_will_stop:
+            self._scheduler_is_running = False
+            self._scheduler_last_stopped = current_time
+
         return scheduled_batches
+
+    def get_states(self, current_time):
+        """
+        Get states of: 
+            - The scheduler
+            - The latest returned batch
+        """
+        while len(self.outstanding_batches) > 0 and self.outstanding_batches[-1].completed:
+            self._last_returned_batch = self.outstanding_batches.popleft()
+
+        # Avg power. It is weighted avg over busy + idle
+        if self._last_returned_batch:
+            b = self._last_returned_batch   # shorthand
+            busy_duration = b.completed_at - b.inference_started_at
+
+            # TTFT
+            ttft_arr = [r.prefill_completed_at - r.arrived_at
+                        for r in b.requests
+                        if r.num_processed_tokens == r.num_prefill_tokens + 1]
+            ttft = np.mean(ttft_arr).item() if len(ttft_arr) > 0 else 0.0
+        else:
+            # Will reach here before any batch returns
+            busy_duration = 0.0
+            ttft = 0.0
+
+        ret = {
+            'waiting_queue_len': self.num_pending_requests,
+            'waiting_queue_num_tokens': sum(
+                [r.num_decode_tokens for r in self._request_queue]),
+            'wait_queue_requests_mean': np.mean(
+                [r.num_decode_tokens for r in self._request_queue]),
+            'wait_queue_requests_std': np.std(
+                [r.num_decode_tokens for r in self._request_queue]),
+            'wait_queue_requests_max': max(
+                [r.num_decode_tokens for r in self._request_queue], default=0),
+            'memory_usage_percent': self.memory_usage_percent,
+            'last_batch_busy_duration': busy_duration,
+            'last_batch_ttft': ttft,
+            'wait_queue_num_prefill_tokens_per_req': [r.num_prefill_tokens for r in self._request_queue],
+            'wait_queue_num_processed_tokens_per_req': [r.num_processed_tokens for r in self._request_queue],
+            'wait_queue_waiting_time_per_req': [current_time - r.arrived_at for r in self._request_queue],
+        }
+        if hasattr(self, 'num_running_requests'):
+            ret['running_queue_len'] = self.num_running_requests
+        return ret
