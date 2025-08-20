@@ -11,6 +11,7 @@ class LBArgs:
     decode_infos: list = dataclasses.field(default_factory=list)
     log_interval: int = 5
     timeout: int = 600
+    warmup: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -70,6 +71,13 @@ class LBArgs:
             default=LBArgs.timeout,
             help=f"Timeout in seconds (default: {LBArgs.timeout})",
         )
+        parser.add_argument(
+            "--warmup",
+            type=bool,
+            action=argparse.BooleanOptionalAction,
+            default=LBArgs.warmup,
+            help=f"Whether warm up each P/D pairs at the start (default: {LBArgs.warmup})",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "LBArgs":
@@ -120,7 +128,7 @@ def main():
         from python.sglang.srt.disaggregation.mini_lb import PrefillConfig, run
 
     prefill_configs = [PrefillConfig(url, port) for url, port in lb_args.prefill_infos]
-    run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port)
+    run(prefill_configs, lb_args.decode_infos, lb_args.host, lb_args.port, lb_args.warmup)
 
 
 if __name__ == "__main__":

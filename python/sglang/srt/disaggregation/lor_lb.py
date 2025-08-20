@@ -20,6 +20,8 @@ from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 from sglang.srt.disaggregation.utils import PDRegistryRequest
 from sglang.srt.utils import maybe_wrap_ipv6_address
 
+import itertools
+
 AIOHTTP_STREAM_READ_CHUNK_SIZE = (
     1024 * 64
 )  # 64KB, to prevent aiohttp's "Chunk too big" error
@@ -51,7 +53,7 @@ class PrefillConfig:
 
 
 class LorBalancer:
-    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str]):
+    def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str], warmup: bool):
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
@@ -61,6 +63,12 @@ class LorBalancer:
         self.prefill_cnt = {p.url: 0 for p in prefill_configs}
         self.decode_cnt_lock = asyncio.Lock()
         self.decode_cnt = {url: 0 for url in decode_servers}
+
+        if warmup:
+            self.warmup_pending = list(itertools.product(self.prefill_servers, self.decode_servers))
+            random.shuffle(self.warmup_pending)
+        else:
+            self.warmup_pending = []
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -78,6 +86,16 @@ class LorBalancer:
         # TODO: return some message instead of panic
         assert len(self.prefill_configs) > 0, "No prefill servers available"
         assert len(self.decode_servers) > 0, "No decode servers available"
+
+        if self.warmup_pending:
+            prefill_server, decode_server = self.warmup_pending.pop()
+            bootstrap_port = self.prefill_bootstrap_map[prefill_server]
+            logger.info(f'LorBalancer warm up: {len(self.warmup_pending)} left')
+            async with self.prefill_cnt_lock:
+                self.prefill_cnt[prefill_server] += 1
+            async with self.decode_cnt_lock:
+                self.decode_cnt[decode_server] += 1
+            return prefill_server, bootstrap_port, decode_server
 
         async with self.prefill_cnt_lock:
             prefill_server = min(self.prefill_cnt, key=self.prefill_cnt.get)
@@ -437,8 +455,8 @@ async def register(obj: PDRegistryRequest):
     return Response(status_code=200)
 
 
-def run(prefill_configs, decode_addrs, host, port):
+def run(prefill_configs, decode_addrs, host, port, warmup):
     global load_balancer
-    load_balancer = LorBalancer(prefill_configs, decode_addrs)
+    load_balancer = LorBalancer(prefill_configs, decode_addrs, warmup)
     uvicorn.run(app, host=host, port=port)
     
