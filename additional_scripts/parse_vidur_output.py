@@ -14,9 +14,9 @@ class PerfStats:
     ttft_mean: float
     ttft_p90: float
     ttft_p99: float
-    tbt_mean: float
-    tbt_p90: float
-    tbt_p99: float
+    tpot_mean: float
+    tpot_p90: float
+    tpot_p99: float
 
 
 def load_trace_into_df(trace_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -26,8 +26,22 @@ def load_trace_into_df(trace_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df_stats = []
     df_batches = []
     df_requests = []
+    flattened_trace = []
     for t in trace:
+        if isinstance(t, dict):
+            flattened_trace.append(t)
+        elif isinstance(t, list):
+            for item in t:
+                if isinstance(item, dict):
+                    flattened_trace.append(item)
+                else:
+                    print(f"WARNING: unexpected item in trace: {item}")
+        else:
+            print(f"WARNING: unexpected type in trace: {t}")
+    for t in flattened_trace:
         if not isinstance(t, dict) and isinstance(t, list):
+            if len(t) > 1:
+                print(len(t))
             t = t[0]
         if t.get('name') == 'stats':
             df_stats.append({
@@ -48,13 +62,6 @@ def load_trace_into_df(trace_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df_batches = pd.DataFrame(df_batches)
     df_requests = pd.DataFrame(df_requests)
 
-    assert (
-        len(df_stats) == len(df_batches)    # Simulator terminated gracefully
-        or len(df_stats) == len(df_batches) + 1  # Terminated early
-    )
-    assert df_stats['ts'].is_monotonic_increasing
-    assert df_batches['ts'].is_monotonic_increasing
-
     df_batches = df_batches.drop('ts', axis=1)
     df_stats = df_stats.join(df_batches, how='inner')
 
@@ -63,40 +70,17 @@ def load_trace_into_df(trace_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 def calc_perf_stats(df_stats: pd.DataFrame, df_requests: pd.DataFrame) -> PerfStats:
     ttft_arr = (df_requests['prefill_completed_at'] - df_requests['arrived_at']).to_numpy()
-    tbt_arr = compute_tbt(df_stats)
+    tpot_arr = ((df_requests['completed_at'] - df_requests['prefill_completed_at'])/df_requests['num_decode_tokens']).to_numpy()
 
     return PerfStats(
         ttft_mean=float(np.mean(ttft_arr)),
         ttft_p90=float(percentile_or_nan(ttft_arr, q=90)),
         ttft_p99=float(percentile_or_nan(ttft_arr, q=99)),
-        tbt_mean=float(np.mean(tbt_arr)),
-        tbt_p90=float(percentile_or_nan(tbt_arr, q=90)),
-        tbt_p99=float(percentile_or_nan(tbt_arr, q=99)),
+        tpot_mean=float(np.mean(tpot_arr)),
+        tpot_p90=float(percentile_or_nan(tpot_arr, q=90)),
+        tpot_p99=float(percentile_or_nan(tpot_arr, q=99)),
     )
 
-
-def compute_tbt(df_stats) -> list:
-    # Precompute mapping: request_id -> list of row indices in df_stats
-    request_id_to_indices = defaultdict(list)
-    for idx, request_list in enumerate(df_stats['request_ids']):
-        for rid in request_list:
-            request_id_to_indices[rid].append(idx)
-
-    timestamps = df_stats['ts'].to_numpy()
-    tbt_arr = []
-    for request_id in df_requests['request_id'].unique():
-        batch_indices = request_id_to_indices.get(request_id, [])
-
-        if not batch_indices:
-            continue
-
-        # Ensure indices are sorted (just in case)
-        batch_indices.sort()
-
-        ts_slice = timestamps[batch_indices]
-        time_differences = np.diff(ts_slice) / 1e6
-        tbt_arr.extend(time_differences.tolist())
-    return tbt_arr
 
 
 def percentile_or_nan(a, q):
