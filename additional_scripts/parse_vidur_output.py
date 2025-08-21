@@ -101,17 +101,17 @@ if __name__ == '__main__':
             continue
         trace_path = expr_dir / 'chrome_trace.json'
 
-        # try:
-        #     df_stats, df_requests = load_trace_into_df(trace_path)
-        #     s = calc_perf_stats(df_stats, df_requests)
-        # except FileNotFoundError:
-        #     print(f'WARNING: log not found, skipping: {trace_path}')
-        #     continue
-        # except AssertionError:
-        #     print(f'WARNING: error parsing log, skipping: {trace_path}')
-        #     continue
-        df_stats, df_requests = load_trace_into_df(trace_path)
-        s = calc_perf_stats(df_stats, df_requests)
+        try:
+            df_stats, df_requests = load_trace_into_df(trace_path)
+            s = calc_perf_stats(df_stats, df_requests)
+        except FileNotFoundError:
+            print(f'WARNING: log not found, skipping: {trace_path}')
+            continue
+        except AssertionError:
+            print(f'WARNING: error parsing log, skipping: {trace_path}')
+            continue
+        # df_stats, df_requests = load_trace_into_df(trace_path)
+        # s = calc_perf_stats(df_stats, df_requests)
 
         df.append({
             'expr_dir': expr_dir.name,

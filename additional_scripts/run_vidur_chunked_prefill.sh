@@ -17,9 +17,9 @@ for size in "${chunk_sizes[@]}"; do
             --replica_config_num_pipeline_stages 1 \
             --request_generator_config_type trace_replay \
             --trace_request_generator_config_max_tokens 4096 \
-            --trace_request_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
-            --trace_request_length_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
-            --trace_request_interval_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
+            --trace_request_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
+            --trace_request_length_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
+            --trace_request_interval_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
             --synthetic_request_generator_config_num_requests 512  \
             --replica_scheduler_config_type sarathi  \
             --sarathi_scheduler_config_batch_size_cap 512  \
@@ -41,9 +41,9 @@ for size in "${chunk_sizes[@]}"; do
         --replica_config_num_pipeline_stages 1 \
         --request_generator_config_type trace_replay \
         --trace_request_generator_config_max_tokens 4096 \
-        --trace_request_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
-        --trace_request_length_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
-        --trace_request_interval_generator_config_trace_file ./data/processed_traces/sharegpt_rps0.5_processed.csv \
+        --trace_request_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
+        --trace_request_length_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
+        --trace_request_interval_generator_config_trace_file ./data/processed_traces/sharegpt_rps2.1875_processed.csv \
         --synthetic_request_generator_config_num_requests 512  \
         --replica_scheduler_config_type sarathi  \
         --sarathi_scheduler_config_batch_size_cap 512  \
