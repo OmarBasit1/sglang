@@ -10,7 +10,7 @@ profile_model() {
     OUTPUT_LENS=(16)
 
     for INPUT in "${INPUT_LENS[@]}"; do
-        OUTPUT_FILE="$OUTPUT_DIR/profile_input_${INPUT}_output_${OUTPUT_LENS}.log"
+        OUTPUT_FILE="$OUTPUT_DIR/profile_input_${INPUT}_output_${OUTPUT_LENS}_TP_${TP_SIZE}.log"
         python -m sglang.bench_one_batch \
             --model-path "$MODEL" \
             --tp-size "$TP_SIZE" \
@@ -32,7 +32,6 @@ mkdir -p "$OUTPUT_DIR"
 profile_model "$MODEL" "$OUTPUT_DIR" 1
 profile_model "$MODEL" "$OUTPUT_DIR" 2
 profile_model "$MODEL" "$OUTPUT_DIR" 4
-profile_model "$MODEL" "$OUTPUT_DIR" 8
 
 
 ################################################
@@ -45,7 +44,6 @@ mkdir -p "$OUTPUT_DIR"
 profile_model "$MODEL" "$OUTPUT_DIR" 1
 profile_model "$MODEL" "$OUTPUT_DIR" 2
 profile_model "$MODEL" "$OUTPUT_DIR" 4
-profile_model "$MODEL" "$OUTPUT_DIR" 8
 
 ################################################
 
@@ -57,7 +55,6 @@ mkdir -p "$OUTPUT_DIR"
 profile_model "$MODEL" "$OUTPUT_DIR" 1
 profile_model "$MODEL" "$OUTPUT_DIR" 2
 profile_model "$MODEL" "$OUTPUT_DIR" 4
-profile_model "$MODEL" "$OUTPUT_DIR" 8
 
 ################################################
 
@@ -66,7 +63,6 @@ SHORT_MODEL="${MODEL#*/}"
 OUTPUT_DIR=Distserve_profile_$SHORT_MODEL
 mkdir -p "$OUTPUT_DIR"
 
-profile_model "$MODEL" "$OUTPUT_DIR" 1
 profile_model "$MODEL" "$OUTPUT_DIR" 2
 profile_model "$MODEL" "$OUTPUT_DIR" 4
 
@@ -77,6 +73,5 @@ SHORT_MODEL="${MODEL#*/}"
 OUTPUT_DIR=Distserve_profile_$SHORT_MODEL
 mkdir -p "$OUTPUT_DIR"
 
-profile_model "$MODEL" "$OUTPUT_DIR" 1
 profile_model "$MODEL" "$OUTPUT_DIR" 2
 profile_model "$MODEL" "$OUTPUT_DIR" 4
