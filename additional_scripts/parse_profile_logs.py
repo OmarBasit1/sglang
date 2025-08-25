@@ -127,25 +127,39 @@ def parse_benchmark_section(section: str, model_name: str, input_size: int, tp_d
     for line in lines:
         line = line.strip()
         
-        # Extract prefill time
-        prefill_match = re.search(r'Prefill\.\s+latency:\s+([\d.]+)\s+s', line)
+        # Extract prefill time (new format: Prefill. latency N: X.XXXX s, throughput: YYYYY token/s)
+        prefill_match = re.search(r'Prefill\. latency (\d+): ([\d.]+) s, throughput:', line)
         if prefill_match:
+            prefill_idx = int(prefill_match.group(1))
+            prefill_latency = float(prefill_match.group(2))
+            # Collect prefill latencies (skip latency 0)
+            if prefill_idx > 1:
+                if 'prefill_latencies' not in locals():
+                    prefill_latencies = []
+                prefill_latencies.append(prefill_latency)
+            # If this is the first prefill line, reset for new batch
             # If we have accumulated data for previous batch size, save it
-            if current_prefill_time is not None and current_batch_size is not None and current_decode_times:
+            if (
+                'prefill_latencies' in locals()
+                and prefill_latencies
+                and current_batch_size is not None
+                and current_decode_times
+                and prefill_idx == 0
+            ):
+                avg_prefill_time = sum(prefill_latencies) / len(prefill_latencies)
                 avg_decode_time = sum(current_decode_times) / len(current_decode_times)
                 results.append({
-                    'model': model_name,
-                    'batch_size': current_batch_size,
-                    'input_size': input_size,
-                    'tp_degree': tp_degree,
-                    'prefill_time': current_prefill_time,
-                    'decode_time': avg_decode_time
+                'model': model_name,
+                'batch_size': current_batch_size,
+                'input_size': input_size,
+                'tp_degree': tp_degree,
+                'prefill_time': avg_prefill_time,
+                'decode_time': avg_decode_time
                 })
-            
-            # Start new batch size group
-            current_prefill_time = float(prefill_match.group(1))
-            current_batch_size = None
-            current_decode_times = []
+                # Start new batch size group
+                prefill_latencies = []
+                current_batch_size = None
+                current_decode_times = []
             continue
         
         # Extract decode times (skip Decode 0)
@@ -166,14 +180,15 @@ def parse_benchmark_section(section: str, model_name: str, input_size: int, tp_d
                 current_decode_times.append(decode_latency)
     
     # Don't forget the last batch size group
-    if current_prefill_time is not None and current_batch_size is not None and current_decode_times:
+    if current_batch_size is not None and current_decode_times and prefill_latencies:
         avg_decode_time = sum(current_decode_times) / len(current_decode_times)
+        avg_prefill_time = sum(prefill_latencies) / len(prefill_latencies)
         results.append({
             'model': model_name,
             'batch_size': current_batch_size,
             'input_size': input_size,
             'tp_degree': tp_degree,
-            'prefill_time': current_prefill_time,
+            'prefill_time': avg_prefill_time,
             'decode_time': avg_decode_time
         })
     
