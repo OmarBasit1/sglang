@@ -247,3 +247,30 @@ class OPT66BModelConfig(Llama2ModelConfig):
     @staticmethod
     def get_name():
         return "facebook/opt-66b"
+    
+    
+
+@dataclass
+class Gemma2_27BModelConfig(BaseModelConfig):
+    num_layers: int = 46
+    num_q_heads: int = 32
+    num_kv_heads: int = 16
+    embedding_dim: int = 4096
+    mlp_hidden_dim: int = 36864
+    max_position_embeddings: int = 8192
+    use_gated_mlp: bool = False
+    use_bias: bool = False
+    use_qkv_bias: bool = False
+    activation: ActivationType = ActivationType.GELU
+    norm: NormType = NormType.RMS_NORM
+    post_attn_norm: bool = True
+    vocab_size: int = 256128
+    is_neox_style: Optional[bool] = True
+    rope_theta: Optional[float] = 10000
+    rope_scaling: Optional[Dict[str, Any]] = None
+    partial_rotary_factor: float = 1.0
+    no_tensor_parallel: bool = False
+
+    @staticmethod
+    def get_name():
+        return "google/gemma-2-27b"
