@@ -73,6 +73,7 @@ from sglang.srt.managers.io_struct import (
     AbortReq,
     CloseSessionReqInput,
     ConfigureLoggingReq,
+    DebugReq,
     EmbeddingReqInput,
     GenerateReqInput,
     GetWeightsByNameReqInput,
@@ -87,6 +88,7 @@ from sglang.srt.managers.io_struct import (
     SetInternalStateReq,
     SlowDownReqInput,
     UnloadLoRAAdapterReqInput,
+    UpdateAgentTimestepReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
@@ -825,9 +827,11 @@ async def slow_down(obj: SlowDownReqInput, request: Request):
 @app.api_route("/load_lora_adapter", methods=["POST"])
 async def load_lora_adapter(obj: LoadLoRAAdapterReqInput, request: Request):
     """Load a new LoRA adapter without re-launching the server."""
+    t1 = time.perf_counter()
     result = await _global_state.tokenizer_manager.load_lora_adapter(obj, request)
 
     if result.success:
+        print(f"\033[92m [SYP][lora]  Loaded LoRA adapter in {time.perf_counter() - t1:.6f} seconds\033[0m")
         return ORJSONResponse(
             result,
             status_code=HTTPStatus.OK,
@@ -1089,6 +1093,41 @@ async def v1_cancel_responses(response_id: str, raw_request: Request):
         response_id
     )
 
+@app.post("/v1/update")
+async def v1_update(obj: UpdateAgentTimestepReq):
+    """Update agent priorities via AgentManager"""
+    try:
+        # Call the tokenizer manager to send update request to scheduler
+        if _global_state.tokenizer_manager is not None:
+            logger.debug(f"Updating agent timestep with: {obj}")
+            _global_state.tokenizer_manager.update_agent_timestep(obj.agent_data, obj.timestep_data, obj.timestep_cnt)
+            return {"status": "success", "message": "Agent timesteps updated successfully"}
+        else:
+            return {"status": "error", "message": "TokenizerManager not available"}
+    except Exception as e:
+        logger.error(f"Exception in v1_update: {e}")
+        return {"status": "error", "message": f"Failed to update agent timesteps: {str(e)}"}
+
+@app.post("/v1/debug")
+async def v1_debug(obj: DebugReq):
+    """Debug endpoint to inspect the current state."""
+    try:
+        _global_state.tokenizer_manager.debug_request(obj.lora_ids)
+        return {"status": "success", "message": "Debug inject successfully"}
+    except Exception as e:
+        logger.error(f"Exception in v1_debug: {e}")
+        return {"status": "error", "message": f"Debug inject failed: {str(e)}"}
+
+@app.post("/v1/init")
+async def v1_initialize():
+    try:
+        if _global_state.tokenizer_manager is not None:
+            _global_state.tokenizer_manager.init_server_personalize()
+            return {"status": "success", "message": "LoRA registry initialized successfully"}
+        else:
+            return {"status": "error", "message": "TokenizerManager not available"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to do initialization: {str(e)}"}
 
 @app.api_route(
     "/v1/rerank", methods=["POST", "PUT"], dependencies=[Depends(validate_json_request)]
@@ -1402,7 +1441,13 @@ def _wait_and_warmup(
     else:
         _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
-    logger.info("The server is fired up and ready to roll!")
+    try:
+        url = server_args.url()
+        res = requests.post(url + "/v1/init")
+        logger.info(f"v1/initialize response: {res.status_code}, {res.text}")
+    except Exception as e:
+        logger.error(f"Failed to call v1/initialize: {e}")
+    logger.critical("The server is fired up and ready to roll!")
 
     if pipe_finish_writer is not None:
         pipe_finish_writer.send("ready")

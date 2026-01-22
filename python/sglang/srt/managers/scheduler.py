@@ -72,6 +72,7 @@ from sglang.srt.managers.io_struct import (
     ClearHiCacheReqInput,
     ClearHiCacheReqOutput,
     CloseSessionReqInput,
+    DebugReq,
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
     FlushCacheReqInput,
@@ -81,6 +82,7 @@ from sglang.srt.managers.io_struct import (
     GetInternalStateReqOutput,
     GetWeightsByNameReqInput,
     HealthCheckOutput,
+    InitReq,
     InitWeightsUpdateGroupReqInput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
@@ -101,6 +103,8 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UpdateAgentTimestepReq,
+    UpdateLoraRegistryReq,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromTensorReqInput,
@@ -131,13 +135,15 @@ from sglang.srt.managers.scheduler_recv_skipper import SchedulerRecvSkipper
 from sglang.srt.managers.scheduler_update_weights_mixin import (
     SchedulerUpdateWeightsMixin,
 )
+from sglang.srt.managers.agent_manager import AgentManager
 from sglang.srt.managers.session_controller import Session
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.tp_worker_overlap_thread import TpModelWorkerClient
 from sglang.srt.managers.utils import DPBalanceMeta, validate_input_length
 from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
-from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache
+from sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
+from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache, LoRAKey
 from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
@@ -256,6 +262,61 @@ class Scheduler(
         # Init model config
         self.model_config = ModelConfig.from_server_args(server_args)
 
+        # For PFEngine
+        self.lora_registry: Dict[str, str] = dict()
+        self.agent_manager = AgentManager(self.server_args.evict_pri_level, self.server_args.load_ahead_step)
+        self.last_update_time = time.time()
+
+        self.batch_per_timestep = 0
+        self.batch_prefill = 0
+        self.batch_decode = 0
+        self.last_batch_prefill = 0
+        self.last_batch_decode = 0
+        
+        self.last_prefill_token_count = 0
+        self.last_decode_token_count = 0
+        self.prefill_token_count = 0
+        self.decode_token_count = 0
+        
+        self.activate_agent = set()
+        self.prefetch_agent = set()
+        self.prefetch_lora = set()
+        self.req_init_ttft = set()
+        self.req_queue_ttft = set()
+        self.req_prefill_ttft = set()
+
+        # Timers for breakdown
+        self.time_get_batch = 0
+        self.time_get_prefill_batch = 0
+        self.time_get_other_batch = 0
+        self.time_process_result = 0
+        self.time_gpu = 0
+        self.time_gpu_prefill = 0
+        self.time_gpu_decode = 0
+        self.time_gpu_start = 0
+        self.time_gpu_end = 0
+        self.load_kv_timer = 0
+        self.load_lora_timer = 0
+        self.prepare_lora_time = 0
+        
+        self.last_time_get_batch = 0
+        self.last_time_get_prefill_batch = 0
+        self.last_time_get_other_batch = 0
+        self.last_time_process_result = 0
+        self.last_time_gpu = 0
+        self.last_time_gpu_prefill = 0
+        self.last_time_gpu_decode = 0
+        self.last_time_gpu_start = 0
+        self.last_time_gpu_end = 0
+        self.last_prepare_lora_time = 0
+        self.agent_call_time = 0
+        
+        self.time_start = -1
+        self.idle_start_time = 0
+        self.is_idle = False
+        self.new_timestep = True
+        self.req_nums = 0
+
         # Init inter-process communication
         context = zmq.Context(2)
         self.idle_sleeper = None
@@ -263,10 +324,15 @@ class Scheduler(
             self.recv_from_tokenizer = get_zmq_socket(
                 context, zmq.PULL, port_args.scheduler_input_ipc_name, False
             )
+            self.recv_from_tokenizer_control = get_zmq_socket(
+                context, zmq.PULL, port_args.scheduler_control_ipc_name, False
+            )
             self.recv_from_rpc = get_zmq_socket(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
             )
-
+            self.recv_from_tokenizer_control = get_zmq_socket(
+                context, zmq.PULL, port_args.scheduler_control_ipc_name, False
+            )
             self.send_to_tokenizer = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_ipc_name, False
             )
@@ -285,11 +351,13 @@ class Scheduler(
                 self.idle_sleeper = IdleSleeper(
                     [
                         self.recv_from_tokenizer,
+                        self.recv_from_tokenizer_control,
                         self.recv_from_rpc,
                     ]
                 )
         else:
             self.recv_from_tokenizer = None
+            self.recv_from_tokenizer_control = None
             self.recv_from_rpc = None
             self.send_to_tokenizer = SimpleNamespace(send_pyobj=lambda x: None)
             self.send_to_detokenizer = SimpleNamespace(send_pyobj=lambda x: None)
@@ -334,6 +402,12 @@ class Scheduler(
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
         )
+
+        if self.server_args.enable_lora:
+            if TpWorkerClass == TpModelWorkerClient:
+                self.lora_manager = self.tp_worker.worker.model_runner.lora_manager
+            else:
+                self.lora_manager = self.tp_worker.model_runner.lora_manager
 
         # Launch a draft worker for speculative decoding
         if self.spec_algorithm.is_eagle():
@@ -542,6 +616,10 @@ class Scheduler(
                 (LoadLoRAAdapterReqInput, self.load_lora_adapter),
                 (UnloadLoRAAdapterReqInput, self.unload_lora_adapter),
                 (MultiTokenizerRegisterReq, self.register_multi_tokenizer),
+                (UpdateAgentTimestepReq, self.update_agent_timestep),
+                (UpdateLoraRegistryReq, self.update_lora_registry),
+                (DebugReq, self.handle_debug_req),
+                (InitReq, self.handle_init_req),
             ]
         )
 
@@ -616,25 +694,51 @@ class Scheduler(
                     enable_kv_cache_events=self.enable_kv_cache_events,
                 )
             elif self.enable_hierarchical_cache:
-                self.tree_cache = HiRadixCache(
-                    req_to_token_pool=self.req_to_token_pool,
-                    token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                    tp_cache_group=(
-                        self.attn_tp_cpu_group
-                        if self.server_args.enable_dp_attention
-                        else self.tp_cpu_group
-                    ),
-                    page_size=self.page_size,
-                    hicache_ratio=server_args.hicache_ratio,
-                    hicache_size=server_args.hicache_size,
-                    hicache_write_policy=server_args.hicache_write_policy,
-                    hicache_io_backend=server_args.hicache_io_backend,
-                    hicache_mem_layout=server_args.hicache_mem_layout,
-                    hicache_storage_backend=server_args.hicache_storage_backend,
-                    hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
-                    model_name=server_args.served_model_name,
-                    storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
-                )
+                if self.enable_lora:
+                    assert (
+                        self.schedule_policy == "fcfs"
+                    ), "LoRA hiradix cache only supports FCFS policy"
+                    self.tree_cache = LoRAHiRadixCache(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                        model_name=server_args.served_model_name,
+                        storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                        agent_manager=self.agent_manager,
+                    )
+                else:
+                    self.tree_cache = HiRadixCache(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                        model_name=server_args.served_model_name,
+                        storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
+                        agent_manager=self.agent_manager,
+                    )
                 self.tp_worker.register_hicache_layer_transfer_counter(
                     self.tree_cache.cache_controller.layer_done_counter
                 )
@@ -661,6 +765,7 @@ class Scheduler(
                     token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                     page_size=self.page_size,
                     disable=server_args.disable_radix_cache,
+                    agent_manager=self.agent_manager,
                 )
             else:
                 self.tree_cache = RadixCache(
@@ -669,8 +774,9 @@ class Scheduler(
                     page_size=self.page_size,
                     disable=server_args.disable_radix_cache,
                     enable_kv_cache_events=self.enable_kv_cache_events,
+                    agent_manager=self.agent_manager,
                 )
-
+        logger.warning(f"tree cache: {self.tree_cache}")
         self.decode_mem_cache_buf_multiplier = (
             1
             if self.spec_algorithm.is_none()
@@ -783,20 +889,53 @@ class Scheduler(
         if hasattr(self.model_config.hf_config, "num_experts_per_tok"):
             initialize_moe_config(self.server_args)
 
+    def _is_control_message(self, recv_req) -> bool:
+        
+        control_message_types = (
+            UpdateLoraRegistryReq,
+            DebugReq,
+        )
+        return isinstance(recv_req, control_message_types)
+
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
+        logger.critical("\033[91m   Using normal event loop\033[0m")
         while True:
             recv_reqs = self.recv_requests()
+
             self.process_input_requests(recv_reqs)
 
+            t1 = time.perf_counter()
             batch = self.get_next_batch_to_run()
+            if self.new_timestep == False:
+                self.time_get_batch += time.perf_counter() - t1
+            
             self.cur_batch = batch
 
             if batch:
+                if self.is_idle == True:
+                    self.is_idle = False
+                    if self.new_timestep == True:
+                        self.new_timestep = False
+                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
+                    else:
+                        self.time_get_other_batch += time.perf_counter() - self.idle_start_time
+                t1 = time.perf_counter()
                 result = self.run_batch(batch)
+                tic = time.perf_counter()
                 self.process_batch_result(batch, result)
+                self.time_process_result = time.perf_counter() - tic
+                self.batch_per_timestep += 1
+                if batch.forward_mode == ForwardMode.EXTEND:
+                    self.time_gpu_prefill += time.perf_counter() - t1
+                elif batch.forward_mode == ForwardMode.DECODE:
+                    self.time_gpu_decode += time.perf_counter() - t1
+                self.time_gpu += time.perf_counter() - t1
             else:
+                if self.is_idle == False:
+                    self.is_idle = True
+                    self.idle_start_time = time.perf_counter()
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
 
@@ -806,16 +945,32 @@ class Scheduler(
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
+        time_gpu_start = 0
+        last_time_gpu_start = 0
 
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
+            tic = time.perf_counter()
             batch = self.get_next_batch_to_run()
+            if self.new_timestep == False:
+                self.time_get_batch += time.perf_counter() - tic
+
             self.cur_batch = batch
 
             if batch:
+                if self.is_idle == True:
+                    self.is_idle = False
+                    if self.new_timestep == True:
+                        self.new_timestep = False
+                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
+                    else:
+                        self.time_get_other_batch += time.perf_counter() - self.idle_start_time
                 batch.launch_done = threading.Event()
+
+                last_time_gpu_start = time_gpu_start
+                time_gpu_start = time.perf_counter()
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -828,10 +983,19 @@ class Scheduler(
                         next_batch_sampling_info=self.tp_worker.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
+                    self.time_gpu += time.perf_counter() - time_gpu_start
+                    
 
             if self.last_batch:
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
+                time_gpu_end = time.perf_counter()
+                if self.time_gpu_start != 0:
+                    self.time_gpu += time_gpu_end - last_time_gpu_start
+                    if self.last_batch.forward_mode == ForwardMode.EXTEND:
+                        self.time_gpu_prefill += time_gpu_end - last_time_gpu_start
+                    elif self.last_batch.forward_mode == ForwardMode.DECODE:
+                        self.time_gpu_decode += time_gpu_end - last_time_gpu_start
                 tmp_batch.next_batch_sampling_info = (
                     self.tp_worker.cur_sampling_info if batch else None
                 )
@@ -839,7 +1003,13 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+                self.batch_per_timestep += 1
             elif batch is None:
+                self.time_gpu_start = 0
+                self.time_gpu_end = 0
+                if self.is_idle == False:
+                    self.is_idle = True
+                    self.idle_start_time = time.perf_counter()
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
 
@@ -848,6 +1018,7 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_pp(self):
         """A non-overlap scheduler loop for pipeline parallelism."""
+        logger.critical("\033[91m   Using overlap event loop\033[0m")
         mbs = [None] * self.pp_size
         last_mbs = [None] * self.pp_size
         self.running_mbs = [
@@ -1001,6 +1172,13 @@ class Scheduler(
 
                 while True:
                     try:
+                        recv_control = self.recv_from_tokenizer_control.recv_pyobj(zmq.NOBLOCK)
+                    except zmq.ZMQError:
+                        break
+                    recv_reqs.append(recv_control)
+
+                while True:
+                    try:
                         recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
@@ -1080,7 +1258,25 @@ class Scheduler(
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
+
+        control_reqs = []
+        normal_reqs = []
+        
         for recv_req in recv_reqs:
+            if self._is_control_message(recv_req):
+                control_reqs.append(recv_req)
+            else:
+                normal_reqs.append(recv_req)
+        
+        for recv_req in control_reqs:
+            try:
+                output = self._request_dispatcher(recv_req)
+                logger.debug(f"Processed control message: {type(recv_req).__name__}")
+
+            except Exception as e:
+                logger.error(f"Error processing control message {recv_req}: {e}")
+        
+        for recv_req in normal_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
                 self.chunked_req is not None
@@ -1167,6 +1363,7 @@ class Scheduler(
                 bootstrap_room=recv_req.bootstrap_room,
                 data_parallel_rank=recv_req.data_parallel_rank,
                 vocab_size=self.model_config.vocab_size,
+                agent_id=recv_req.agent_id,
             )
             req.tokenizer = self.tokenizer
 
@@ -1334,6 +1531,9 @@ class Scheduler(
             self.disagg_decode_prealloc_queue.extend(reqs, is_retracted)
         else:
             self.waiting_queue.extend(reqs)
+            t0 = time.perf_counter()
+            for r in reqs:
+                r.waiting_queue_time = t0
 
     def handle_embedding_request(
         self,
@@ -1514,6 +1714,7 @@ class Scheduler(
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
+        # t1 = time.perf_counter()
         chunked_req_to_exclude = set()
         if self.chunked_req:
             # Move the chunked request out of the batch so that we can merge
@@ -1545,7 +1746,10 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
+        t2 = time.perf_counter()
         new_batch = self.get_new_batch_prefill()
+        if self.new_timestep == False:
+            self.time_get_prefill_batch += time.perf_counter() - t2
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
 
@@ -1560,6 +1764,7 @@ class Scheduler(
             ret = new_batch
         else:
             # Run decode
+            tic = time.perf_counter()
             if not self.running_batch.is_empty():
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
@@ -1575,6 +1780,12 @@ class Scheduler(
                 self.handle_dp_balance_data(ret)
             ret = self.prepare_mlp_sync_batch(ret)
 
+        if ret is not None and ret.reqs is not None:
+            for req in ret.reqs:
+                if req.agent_id is not None:
+                    self.activate_agent.add(req.agent_id)
+
+        # self.time_get_batch += time.perf_counter() - t1
         return ret
 
     def get_num_allocatable_reqs(self, running_bs):
@@ -1629,9 +1840,64 @@ class Scheduler(
         if self.enable_lora:
             lora_set = set([req.lora_id for req in self.running_batch.reqs])
 
-        # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        prefix_computed = False
+        if self.time_start == -1:
+            self.time_start = time.perf_counter()
+        if self.enable_hierarchical_cache:
+            for req in self.waiting_queue:
+                if not req.is_fetched:
+                    self.req_nums += 1
+                    if isinstance(self.tree_cache, LoRAHiRadixCache):
+                        # LoRA-aware prefix matching
+                        (
+                            req.prefix_indices,
+                            req.last_node,
+                            req.last_host_node,
+                            req.host_hit_length,
+                        ) = self.tree_cache.match_prefix_with_lora_id(
+                            key=LoRAKey(
+                                lora_id=req.lora_id, token_ids=req.adjust_max_prefix_ids()
+                            )
+                        )
+                    else:
+                        (
+                            req.prefix_indices,
+                            req.last_node,
+                            req.last_host_node,
+                            req.host_hit_length,
+                        ) = self.tree_cache.match_prefix(
+                            key=req.adjust_max_prefix_ids()
+                        )
+                    self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
+                    req.is_fetched = True
+            prefix_computed = True
 
+        # Get requests from the waiting queue to a new prefill batch
+        waiting_queue_iter = self.waiting_queue
+        if self.enable_lora:
+            # Prioritize requests whose LoRA weights are already in GPU slots.
+            lora_memory_pool = self.lora_manager.memory_pool
+            loaded_lora_ids = lora_memory_pool.uid_to_buffer_id.keys()
+            
+            def _req_lora_id(req: Req):
+                if getattr(req, "lora_id", None) is not None:
+                    return req.lora_id
+                lora_name = f"lora{req.agent_id}" if req.agent_id is not None else None
+                if lora_name is not None:
+                    return self.lora_registry.get(lora_name)
+                return None
+
+            waiting_in_slot, waiting_not_in_slot = [], []
+            for req in self.waiting_queue:
+                lora_id = _req_lora_id(req)
+                if lora_id is not None and lora_id in loaded_lora_ids:
+                    waiting_in_slot.append(req)
+                else:
+                    waiting_not_in_slot.append(req)
+            waiting_queue_iter = waiting_in_slot + waiting_not_in_slot
+
+        for req in waiting_queue_iter:
+            
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
                 lora_set
                 | set([req.lora_id for req in adder.can_run_list])
@@ -1657,7 +1923,26 @@ class Scheduler(
                     # skip staging requests that are ongoing prefetch
                     continue
 
-            req.init_next_round_input(self.tree_cache)
+            req.init_next_round_input(
+                None if prefix_computed else self.tree_cache,
+                self.enable_hierarchical_cache,
+            )   # TODO: Check if this is needed
+            # req.init_next_round_input(self.tree_cache)
+            
+            if self.tree_cache is not None and self.enable_hierarchical_cache:
+                self.tree_cache.ready_to_load_host_cache() # TODO whether or not to do this? -> MUST DO IT!  enable layer?
+                loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
+                if self.agent_call_time == 0:
+                    self.agent_call_time = time.perf_counter()
+                logger.warning(f"[aid: {req.agent_id}][len {len(waiting_queue_iter)}][time: {time.perf_counter() - self.agent_call_time:.4f}] Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
+                if loading_status == self.tree_cache.REQ_IS_EVICTED:
+                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Evict] Request {req.rid} Node {req.last_host_node.id}")
+                    self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
+                    continue
+                elif loading_status == self.tree_cache.REQ_IS_LOADING:
+                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Loading] Request {req.rid} Node {req.last_host_node.id}")
+                    continue
+
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
 
             if res != AddReqResult.CONTINUE:
@@ -1671,9 +1956,14 @@ class Scheduler(
                         self.running_batch.batch_is_full = True
                 break
 
+            # self.activate_agent.add(req.agent_id)
+
+
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
         if len(can_run_list) == 0:
+            logger.warning(f"can run list is 0, batch is full = {self.running_batch.batch_is_full}")
+            logger.warning(f"available size: {self.token_to_kv_pool_allocator.available_size()}")
             return None
 
         if self.enable_metrics:
@@ -1733,6 +2023,9 @@ class Scheduler(
         else:
             new_batch.decoding_reqs = None
 
+        # for req in new_batch.reqs:
+            # self.activate_agent.add(req.agent_id)
+
         return new_batch
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
@@ -1781,6 +2074,9 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        for r in batch.reqs:
+            r.start_prefill_time = time.perf_counter()
+        
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
         if self.forward_sleep_time is not None:
@@ -1824,6 +2120,10 @@ class Scheduler(
             # These 2 values are needed for processing the output, but the values can be
             # modified by overlap schedule. So we have to copy them here so that
             # we can use the correct values in output processing.
+            # if batch.forward_mode.is_extend():
+            #     current_extend_token = sum(extend_input_len_per_req)
+            #     self.prefill_token_count += current_extend_token
+            #     logger.critical(f"[Prefill] {current_extend_token}")
             if batch.return_logprob or self.spec_algorithm.is_eagle():
                 extend_input_len_per_req = [req.extend_input_len for req in batch.reqs]
             else:
@@ -1834,6 +2134,8 @@ class Scheduler(
                 ]
             else:
                 extend_logprob_start_len_per_req = None
+
+            extend_input_len_per_req = [req.extend_input_len for req in batch.reqs]
 
             ret = GenerationBatchResult(
                 logits_output=logits_output if self.pp_group.is_last_rank else None,
@@ -1862,9 +2164,12 @@ class Scheduler(
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
         launch_done: Optional[threading.Event] = None,
     ):
+        tic = time.perf_counter()
         if batch.forward_mode.is_decode():
+            self.batch_decode += 1
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
+            self.batch_prefill += 1
             self.process_batch_result_prefill(batch, result, launch_done)
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
@@ -1874,6 +2179,7 @@ class Scheduler(
             self.set_next_batch_sampling_info_done(batch)
 
         self.maybe_send_health_check_signal()
+        self.time_process_result += time.perf_counter() - tic
 
     def maybe_send_health_check_signal(self):
         if self.return_health_check_ct:
@@ -2558,6 +2864,117 @@ class Scheduler(
         self.send_to_detokenizer.send_pyobj(recv_req)
         return None
 
+    def update_lora_registry(self, recv_req: UpdateLoraRegistryReq):
+        """Update the LoRA adapter registry and forward to detokenizer."""
+        try:
+            self.lora_registry = recv_req.update_registry_dict
+            self.lora_manager.memory_pool._lora_registry = {v: k for k, v in self.lora_registry.items()}
+            logger.info(f"\033[94m [Lora][Updated]\033[0m    Updated LoRA registry: {self.lora_registry}")
+        except Exception as e:
+            logger.error(f"Failed to update LoRA registry: {e}")
+        
+    def prefetch_lora_timesteps(self, lora_name: Optional[str], priority: int = 0, step_lora_names: List[str] = []) -> bool:
+        """Prefetch LoRA adapter weights for the next few time steps."""
+        # remember to call update_lora_priority before this
+        if not self.lora_registry or lora_name is None:
+            logger.error("LoRA registry is empty or lora_name is None, cannot prefetch LoRA weights.")
+            return
+        lora_id = self.lora_registry.get(lora_name, None)
+        step_lora_ids = [self.lora_registry.get(name, None) for name in step_lora_names if name in self.lora_registry]
+        return self.lora_manager.prefetch_lora_weights(priority=priority, lora_id=lora_id, step_lora_ids=step_lora_ids)
+
+    def handle_debug_req(self, recv_req: DebugReq):
+        lora_ids = recv_req.lora_ids
+        for i in range(len(lora_ids)):
+            lora_names = lora_ids[i]
+            for lora_name in lora_ids[i]:
+                self.prefetch_lora_timesteps(lora_name=lora_name, priority=i, step_lora_names=lora_names)
+
+    def handle_init_req(self, recv_req: InitReq):
+        """Handle init request: flush cache and initialize lora_registry if needed."""
+        try:
+            self.flush_cache()
+            logger.info("[Init] Scheduler cache flushed successfully on init request!")
+            if recv_req.update_registry_dict:
+                self.lora_registry = recv_req.update_registry_dict
+                self.lora_manager.memory_pool._lora_registry = {v: k for k, v in self.lora_registry.items()}
+                logger.info(f"[Init][Lora][Updated] Initialized LoRA registry: {self.lora_registry}")
+        except Exception as e:
+            logger.error(f"Failed to handle init request: {e}")
+
+    def update_agent_timestep(self, recv_req):
+        """Handle agent priority update request"""
+        if hasattr(self, 'agent_manager') and self.agent_manager is not None:
+            try:
+                if recv_req is None:
+                    logger.error("Received None for agent timestep update request")
+                    return
+                print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
+                print(f"Updated agent timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                self.tree_cache._update_leaf_node_timestep()
+                print(f"Updated leaf node timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                # if self.server_args.enable_hierarchical_cache:
+                #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
+                # else:
+                #     self.tree_cache.pretty_print()
+                logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
+                if self.server_args.enable_hierarchical_cache:
+                    kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
+                if not self.server_args.disable_prefetch:
+                    self.prefetch_agent_timestep(self.server_args.load_ahead_step)
+                last_update_time = self.last_update_time
+                end_time = time.time()                
+                lasting_time = end_time - last_update_time
+                # self.lora_manager.memory_pool.print_buffer_status()
+                rate = (self.decode_token_count - self.last_decode_token_count) / (self.prefill_token_count - self.last_prefill_token_count) if (self.prefill_token_count - self.last_prefill_token_count) > 0 else -1
+                rate_all = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
+                logger.critical(f"\033[94m TOKENN \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
+                if self.server_args.enable_hierarchical_cache:
+                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {kv_before} / {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
+                else:
+                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
+                logger.critical(f"\033[94m GPURUN \033[0m:  [LORA {self.lora_manager.get_and_update_lora_time()}] [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
+                g0, g1, g2 = self.tp_worker.get_gpu_time()
+                logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
+                self.tp_worker.reset_gpu_time()
+                init_ttft = sum(self.req_init_ttft) / len(self.req_init_ttft) if len(self.req_init_ttft) > 0 else 0
+                queue_ttft = sum(self.req_queue_ttft) / len(self.req_queue_ttft) if len(self.req_queue_ttft) > 0 else 0
+                prefill_ttft = sum(self.req_prefill_ttft) / len(self.req_prefill_ttft) if len(self.req_prefill_ttft) > 0 else 0
+                logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}][Reqs {self.req_nums}]{self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
+                logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
+                logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
+                logger.critical("==="*10)
+                self.batch_per_timestep = 0
+                self.activate_agent = set()
+                self.last_update_time = time.time()
+                self.last_time_get_batch = self.time_get_batch
+                self.last_time_get_prefill_batch = self.time_get_prefill_batch
+                self.last_time_get_other_batch = self.time_get_other_batch
+                self.last_time_process_result = self.time_process_result
+                self.last_time_gpu = self.time_gpu
+                self.last_time_gpu_prefill = self.time_gpu_prefill
+                self.last_time_gpu_decode = self.time_gpu_decode
+                self.last_time_gpu_start = self.time_gpu_start
+                self.last_time_gpu_end = self.time_gpu_end
+                self.last_prefill_token_count = self.prefill_token_count
+                self.last_decode_token_count = self.decode_token_count
+                self.last_batch_prefill = self.batch_prefill
+                self.last_batch_decode = self.batch_decode
+                self.req_init_ttft.clear()
+                self.req_queue_ttft.clear()
+                self.req_prefill_ttft.clear()
+                self.new_timestep = True
+                self.req_nums = 0
+                self.agent_call_time = 0
+                logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
+            except Exception as e:
+                logger.error(f"Failed to update agent timesteps: {e}")
+        else:
+            logger.error("AgentManager not available, ignoring timestep update request")
+
+
 
 class IdleSleeper:
     """
@@ -2691,3 +3108,6 @@ def run_scheduler_process(
         traceback = get_exception_traceback()
         logger.error(f"Scheduler hit an exception: {traceback}")
         parent_process.send_signal(signal.SIGQUIT)
+
+
+### python -m sglang.launch_server --model-path Qwen/Qwen2.5-7B-Instruct --port 8001 --enable-lora --max-loras-per-batch 20 --lora-paths lora0=qingpingwan/Qwen2.5-7B-Lora-Law lora1=qingpingwan/Qwen2.5-7B-Lora-Law lora2=qingpingwan/Qwen2.5-7B-Lora-Law lora3=qingpingwan/Qwen2.5-7B-Lora-Law lora4=qingpingwan/Qwen2.5-7B-Lora-Law lora5=qingpingwan/Qwen2.5-7B-Lora-Law lora6=qingpingwan/Qwen2.5-7B-Lora-Law lora7=qingpingwan/Qwen2.5-7B-Lora-Law lora8=qingpingwan/Qwen2.5-7B-Lora-Law lora9=qingpingwan/Qwen2.5-7B-Lora-Law lora10=qingpingwan/Qwen2.5-7B-Lora-Law lora11=qingpingwan/Qwen2.5-7B-Lora-Law lora12=qingpingwan/Qwen2.5-7B-Lora-Law lora13=qingpingwan/Qwen2.5-7B-Lora-Law lora14=qingpingwan/Qwen2.5-7B-Lora-Law lora15=qingpingwan/Qwen2.5-7B-Lora-Law lora16=qingpingwan/Qwen2.5-7B-Lora-Law lora17=qingpingwan/Qwen2.5-7B-Lora-Law lora18=qingpingwan/Qwen2.5-7B-Lora-Law lora19=qingpingwan/Qwen2.5-7B-Lora-Law  lora20=qingpingwan/Qwen2.5-7B-Lora-Law lora21=qingpingwan/Qwen2.5-7B-Lora-Law lora22=qingpingwan/Qwen2.5-7B-Lora-Law lora23=qingpingwan/Qwen2.5-7B-Lora-Law lora24=qingpingwan/Qwen2.5-7B-Lora-Law lora25=qingpingwan/Qwen2.5-7B-Lora-Law  --lora-backend triton --max-total-tokens 50000 --enable-hierarchical-cache --hicache-size 10 --log-level warning --disable-kv-pf

@@ -18,7 +18,7 @@ import threading
 from typing import Optional, Tuple, Union
 
 import torch
-
+import queue
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.hf_transformers_utils import (
@@ -161,6 +161,13 @@ class TpModelWorker:
         self.worker = self
 
         self.hicache_layer_transfer_counter = None
+        
+        self.profiling_queue = queue.Queue()
+        self.profiler_thread = threading.Thread(target=self._profiler_thread_func, daemon=True)
+        self.profiler_thread.start()
+        self.time_gpu = 0
+        self.time_gpu_prefill = 0
+        self.time_gpu_decode = 0
 
     def register_hicache_layer_transfer_counter(self, counter):
         self.hicache_layer_transfer_counter = counter
@@ -225,8 +232,13 @@ class TpModelWorker:
     ) -> Tuple[
         Union[LogitsProcessorOutput, torch.Tensor], Optional[torch.Tensor], bool
     ]:
-        forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
 
+        forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        mode = "prefill" if forward_batch.forward_mode.is_extend() else "decode"
+        start_event.record()
+        
         pp_proxy_tensors = None
         if not self.pp_group.is_first_rank:
             pp_proxy_tensors = PPProxyTensors(
@@ -248,7 +260,10 @@ class TpModelWorker:
                 next_token_ids = self.model_runner.sample(
                     logits_output, model_worker_batch
                 )
-
+            
+            end_event.record()
+            self.profiling_queue.put((start_event, end_event, mode))
+            
             return logits_output, next_token_ids, can_run_cuda_graph
         else:
             pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(
@@ -315,3 +330,25 @@ class TpModelWorker:
 
     def can_run_lora_batch(self, lora_ids: list[str]) -> bool:
         return self.model_runner.lora_manager.validate_lora_batch(lora_ids)
+
+    def _profiler_thread_func(self):
+        while True:
+            try:
+                start_event, end_event, mode = self.profiling_queue.get(timeout=1.0)
+                end_event.synchronize()
+                elapsed_time = start_event.elapsed_time(end_event)
+                self.time_gpu += elapsed_time
+                if mode == "prefill":
+                    self.time_gpu_prefill += elapsed_time
+                elif mode == "decode":
+                    self.time_gpu_decode += elapsed_time
+            except queue.Empty:
+                continue
+
+    def get_gpu_time(self):
+        return self.time_gpu, self.time_gpu_prefill, self.time_gpu_decode
+
+    def reset_gpu_time(self):
+        self.time_gpu = 0
+        self.time_gpu_prefill = 0
+        self.time_gpu_decode = 0

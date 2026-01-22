@@ -21,12 +21,13 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MHATokenToKVPoolHost,
     MLATokenToKVPoolHost,
 )
-from sglang.srt.mem_cache.radix_cache import RadixCache, TreeNode
+# from sglang.srt.mem_cache.radix_cache import RadixCache, TreeNode
+from sglang.srt.mem_cache.lora_radix_cache import LoRARadixCache, LoRATreeNode, LoRAKey
 
 logger = logging.getLogger(__name__)
 
 
-class HiRadixCache(RadixCache):
+class LoRAHiRadixCache(LoRARadixCache):
 
     REQ_IS_EVICTED = 0
     REQ_IS_LOADING = 1
@@ -84,7 +85,7 @@ class HiRadixCache(RadixCache):
         self.prefetch_threshold = 256
         self.prefetch_timeout = 3  # seconds
         self.prefetch_stop_policy = hicache_storage_prefetch_policy
-        # For PFEngine
+
         self.agent_manager = agent_manager
 
         self.load_cache_event = threading.Event()
@@ -113,21 +114,20 @@ class HiRadixCache(RadixCache):
         self.write_through_threshold = (
             1 if hicache_write_policy == "write_through" else 2
         )
-        self.load_back_threshold = 0
+        self.load_back_threshold = 0   # TODO change to 0
         super().__init__(
             req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False, agent_manager=self.agent_manager
         )
-
         logger.info(f"HiRadixCache initialized with write_policy = {hicache_write_policy}, write_through_threshold = {self.write_through_threshold}, "
                     f"io_backend = {hicache_io_backend}, storage_backend = {hicache_storage_backend}, layout = {hicache_mem_layout}")
 
     def reset(self):
-        TreeNode.counter = 0
+        LoRATreeNode.counter = 0
         self.cache_controller.reset()
         self.token_to_kv_pool_host.clear()
         super().reset()
 
-    def get_height(self, node: TreeNode):
+    def get_height(self, node: LoRATreeNode):
         height = 0
         while node != self.root_node:
             node = node.parent
@@ -143,7 +143,7 @@ class HiRadixCache(RadixCache):
             logger.warning("Hierarchical cache storage backend is not enabled.")
             return False
 
-    def write_backup(self, node: TreeNode, write_back=False):
+    def write_backup(self, node: LoRATreeNode, write_back=False):
         logger.info(f"Write back node {node.id} to host, len {len(node.key)}")
         host_indices = self.cache_controller.write(
             device_indices=node.value,
@@ -167,14 +167,15 @@ class HiRadixCache(RadixCache):
 
         return len(host_indices)
 
-    def write_backup_storage(self, node: TreeNode):
+    # NO USE
+    def write_backup_storage(self, node: LoRATreeNode):
         operation_id = self.cache_controller.write_storage(
             node.host_value, node.key, node.hash_value
         )
         self.ongoing_backup[operation_id] = node
         node.protect_host()
 
-    def _inc_hit_count(self, node: TreeNode, chunked=False):
+    def _inc_hit_count(self, node: LoRATreeNode, chunked=False):
         # skip the hit count update for chunked requests
         if self.cache_controller.write_policy == "write_back" or chunked:
             return
@@ -321,8 +322,7 @@ class HiRadixCache(RadixCache):
         
         return num_evicted
 
-
-    def _evict_backuped(self, node: TreeNode):
+    def _evict_backuped(self, node: LoRATreeNode):
         # evict a node already written to host
         logger.debug(f"\033[33m [Evict][backuped]    node: {node.id}\033[0m")
         num_evicted = self.cache_controller.evict_device(node.value, node.host_value)
@@ -332,7 +332,7 @@ class HiRadixCache(RadixCache):
         node.value = None
         return num_evicted
 
-    def _evict_regular(self, node: TreeNode):
+    def _evict_regular(self, node: LoRATreeNode):
         # evict a node not initiated write to host
         logger.debug(f"\033[33m [Evict][regular]    node: {node.id}\033[0m")
         self.cache_controller.mem_pool_device_allocator.free(node.value)
@@ -369,7 +369,7 @@ class HiRadixCache(RadixCache):
                 heapq.heappush(leaves, x.parent)
 
     def load_back(
-        self, node: TreeNode, mem_quota: Optional[int] = None, priority: Optional[int] = None, check_reserve: Optional[bool] = False
+        self, node: LoRATreeNode, mem_quota: Optional[int] = None, priority: Optional[int] = None, check_reserve: Optional[bool] = False
     ) -> Optional[torch.Tensor]:
         # todo: more loading policies
 
@@ -397,7 +397,6 @@ class HiRadixCache(RadixCache):
         
         if ancester_node is None:
             ancester_node = node
-
 
         if len(nodes_to_load) == 0:
             logger.warning(f"\033[94m [load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading} \033[0m")
@@ -455,7 +454,7 @@ class HiRadixCache(RadixCache):
 
     def init_load_back(
         self,
-        last_node: TreeNode,
+        last_node: LoRATreeNode,
         host_hit_length: int,
         mem_quota: Optional[int] = None,
         priority: Optional[int] = None
@@ -629,6 +628,11 @@ class HiRadixCache(RadixCache):
         return True
 
     def match_prefix(self, key: List[int], **kwargs):
+        raise ValueError(
+            "LoRARadixCache needs both token ids and lora id as inputs for matching. Please use match_prefix_with_lora_id instead."
+        )
+    
+    def match_prefix_with_lora_id(self, key: LoRAKey, **kwargs) -> MatchResult: # TODO: matchresult necessary?
         empty_value = torch.empty((0,), dtype=torch.int64, device=self.device)
         if self.disable or len(key) == 0:
             return MatchResult(
@@ -667,7 +671,7 @@ class HiRadixCache(RadixCache):
     def prefetch_from_storage(
         self,
         req_id: str,
-        last_host_node: TreeNode,
+        last_host_node: LoRATreeNode,
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
     ):
@@ -704,7 +708,7 @@ class HiRadixCache(RadixCache):
         self.cache_controller.prefetch_tokens_occupied += len(new_input_tokens)
 
     # NO USE
-    def _insert_helper_host(self, node: TreeNode, key: List, host_value, hash_value):
+    def _insert_helper_host(self, node: LoRATreeNode, key: List, host_value, hash_value):
         node.last_access_time = time.monotonic()
         if len(key) == 0:
             return 0
@@ -729,7 +733,7 @@ class HiRadixCache(RadixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode(cache=self, ignore_holding=False)
+            new_node = LoRATreeNode(cache=self, ignore_holding=False)
             new_node.parent = node
             new_node.key = key
             new_node.value = None
@@ -739,7 +743,8 @@ class HiRadixCache(RadixCache):
             new_node.agents = copy.deepcopy(node.agents)
         return matched_length
 
-    def _match_prefix_helper(self, node: TreeNode, key: List):
+
+    def _match_prefix_helper(self, node: LoRATreeNode, key: LoRAKey):
         node.last_access_time = time.monotonic()
         child_key = self.get_child_key_fn(key)
         value = []
@@ -758,20 +763,22 @@ class HiRadixCache(RadixCache):
                 if not child.evicted:
                     value.append(child.value)
                 node = child
-                key = key[prefix_len:]
+                key = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[prefix_len:])
 
                 if len(key):
                     child_key = self.get_child_key_fn(key)
 
         return value, node
 
-    def _split_node(self, key, child: TreeNode, split_len: int):
+    def _split_node(self, key: LoRAKey, child: LoRATreeNode, split_len: int):
         # child node split into new_node -> child
-        new_node = TreeNode(cache=self, ignore_holding=False)
-        new_node.children = {self.get_child_key_fn(key[split_len:]): child}
+        new_node = LoRATreeNode(cache=self, ignore_holding=False)
+        key_split_1 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[:split_len])
+        key_split_2 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[split_len:])
+        new_node.children = {self.get_child_key_fn(key_split_2): child}
         new_node.parent = child.parent
         new_node.lock_ref = child.lock_ref
-        new_node.key = child.key[:split_len]
+        new_node.key = key_split_1
         new_node.loading = child.loading
         new_node.hit_count = child.hit_count
         new_node.agents = copy.deepcopy(child.agents)
@@ -790,11 +797,11 @@ class HiRadixCache(RadixCache):
             new_node.hash_value = child.hash_value[: split_len // self.page_size]
             child.hash_value = child.hash_value[split_len // self.page_size :]
         child.parent = new_node
-        child.key = child.key[split_len:]
+        child.key = key_split_2
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
         return new_node
 
-    def insert(self, key: List, value, chunked=False):
+    def insert(self, key: LoRAKey, value, chunked=False):
         if len(key) == 0:
             return 0
 
@@ -829,14 +836,14 @@ class HiRadixCache(RadixCache):
                     total_prefix_length += prefix_len
                 node = new_node
 
-            key = key[prefix_len:]
+            key = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[prefix_len:])
             value = value[prefix_len:]
 
             if len(key):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = TreeNode(cache=self, ignore_holding=False)
+            new_node = LoRATreeNode(cache=self, ignore_holding=False)
             new_node.parent = node
             new_node.key = key
             new_node.value = value
@@ -888,6 +895,7 @@ class HiRadixCache(RadixCache):
                         stack.append(cur_child)
         return ret_list
 
+    # NO USE
     def release_aborted_request(self, rid: str):
         if rid not in self.ongoing_prefetch:
             return
@@ -905,7 +913,7 @@ class HiRadixCache(RadixCache):
         self.cache_controller.append_host_mem_release(host_indices[:completed_tokens])
         self.cache_controller.prefetch_tokens_occupied -= len(token_ids)
 
-    def get_node_chain_status(self, req_last_node: TreeNode):
+    def get_node_chain_status(self, req_last_node: LoRATreeNode):
         n = req_last_node
         while n != self.root_node:
             if n.evicted:
@@ -934,7 +942,7 @@ class HiRadixCache(RadixCache):
         logger.info("[Hold][Update] Leaf node priorities updated.")
         return
 
-    def hi_pretty_print(self, node: TreeNode, indent: int):
+    def hi_pretty_print(self, node: LoRATreeNode, indent: int):
         """Prints the radix tree in a human-readable format."""
         stack = [(node, indent)]
         while stack:

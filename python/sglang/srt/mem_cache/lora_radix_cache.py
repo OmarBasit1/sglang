@@ -2,14 +2,27 @@
 
 import heapq
 import time
+import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, List, Optional
+import math
+import copy
 
 import torch
 
+# from python.sglang.srt.mem_cache.lora_hiradix_cache import LoRAHiRadixCache
+from sglang.srt.disaggregation.kv_events import (
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+)
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache, MatchResult
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.radix_cache import AgentInfo
+from sglang.srt.managers.agent_manager import AgentManager
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -42,7 +55,7 @@ class LoRATreeNode:
 
     counter = 0
 
-    def __init__(self, id: Optional[int] = None):
+    def __init__(self, id: Optional[int] = None, cache: Optional["LoRARadixCache"] = None, ignore_holding: bool = True):
         self.children = defaultdict(LoRATreeNode)
         self.parent: LoRATreeNode = None
         self.key: LoRAKey = None
@@ -50,15 +63,79 @@ class LoRATreeNode:
         self.lock_ref = 0
         self.last_access_time = time.monotonic()
 
+        self.hit_count = 0
+        # indicating the node is loading KV cache from host
+        self.loading = False
+        # indicating the node is locked to protect from eviction
+        # incremented when the node is referenced by a storage operation
+        self.host_ref_counter = 0
+        # store the host indices of KV cache
+        self.host_value: Optional[torch.Tensor] = None
+        # store hash values of each pages
+        self.hash_value: Optional[List[str]] = None
+
         self.id = LoRATreeNode.counter if id is None else id
         LoRATreeNode.counter += 1
+
+        # For PFEngine
+        # Each node's corresponding agents is represented as a str index dict: 
+        # (agent_id: str, priority: float, hit_cnt: int, last_call_time: int, continue_call: int)
+        # self.agents: dict[str, AgentInfo] = {}
+        self.agents: dict[str, str] = {}
+        self.cache = cache
+        self.ignore_holding = ignore_holding
+        self.hold_priority = 0
+        self.hold_priority_version: int = -1
+
+    @property
+    def _hold_priority(self):
+        return self.hold_priority
 
     @property
     def evicted(self):
         return self.value is None
 
+    @property
+    def backuped(self):
+        return self.host_value is not None
+
+    def protect_host(self):
+        """Protect the host value from eviction."""
+        self.host_ref_counter += 1
+
+    def release_host(self):
+        """Release the host value, allowing it to be evicted."""
+        if self.host_ref_counter > 0:
+            self.host_ref_counter -= 1
+        else:
+            raise RuntimeError("Host reference counter is already zero.")
+
+    def get_last_hash_value(self) -> Optional[str]:
+        """Returns the hash value of the last page in this node."""
+        if self.hash_value is None or len(self.hash_value) == 0:
+            return None
+        return self.hash_value[-1]
+
     def __lt__(self, other: "LoRATreeNode"):
         return self.last_access_time < other.last_access_time
+        if self.cache and self.cache.agent_manager:
+            self_agent_id, self_priority = self.cache.agent_manager.get_agents_hold_priority(list(self.agents.keys()))
+            other_agent_id, other_priority = other.cache.agent_manager.get_agents_hold_priority(list(other.agents.keys()))
+            # print(f"self_priority: {self_priority}, other_priority: {other_priority}")
+            if self_priority == other_priority or self_agent_id == -1 or other_agent_id == -1 or self.ignore_holding or other.ignore_holding:
+                return self.agents[self_agent_id].get_priority() < other.agents[other_agent_id].get_priority()
+            return self_priority < other_priority
+
+        # Fallback to original logic if agent_manager is not available
+        self_priority = max(
+            (agent_info.get_priority() for agent_info in self.agents.values()),
+            default=-1,
+        )
+        other_priority = max(
+            (agent_info.get_priority() for agent_info in other.agents.values()),
+            default=-1,
+        )
+        return self_priority < other_priority
 
 
 def _key_match(key0: LoRAKey, key1: LoRAKey):
@@ -75,13 +152,14 @@ def _key_match(key0: LoRAKey, key1: LoRAKey):
 
 
 class LoRARadixCache(BasePrefixCache):
-
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
         token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
         page_size: int,
         disable: bool = False,
+        enable_kv_cache_events: bool = False,
+        agent_manager: Optional[AgentManager] = None,
     ):
         if page_size > 1:
             raise ValueError("LoRARadixCache currently only supports page_size = 1")
@@ -95,18 +173,29 @@ class LoRARadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.page_size = page_size
         self.disable = disable
-        self.device = self.token_to_kv_pool_allocator.device
+        self.enable_kv_cache_events = enable_kv_cache_events
+        self.kv_event_queue = []
+        self.agent_manager = agent_manager
+
+        if self.token_to_kv_pool_allocator:
+            self.device = self.token_to_kv_pool_allocator.device
+        else:
+            self.device = torch.device("cpu")
 
         self.key_match_fn = _key_match
         self.get_child_key_fn = get_child_key
         self.reset()
+        logger.info(f"LoRARadixCache initialized with page_size = {self.page_size}, disable = {self.disable}, enable_kv_cache_events = {self.enable_kv_cache_events}")
 
     def reset(self):
-        self.root_node = LoRATreeNode()
+        self.root_node = LoRATreeNode(cache=self)
         self.root_node.key = LoRAKey(lora_id="", token_ids=[])
-        self.root_node.value = None
+        self.root_node.value = []
+        self.root_node.host_value = []
+        self.root_node.lock_ref = 1
         self.evictable_size_ = 0
         self.protected_size_ = 0
+        self._record_all_cleared_event()
 
     def match_prefix(self, key: List[int], **kwargs) -> MatchResult:
         raise ValueError(
@@ -146,7 +235,7 @@ class LoRARadixCache(BasePrefixCache):
             last_host_node=last_node,
         )
 
-    def insert(self, key: LoRAKey, value=None):
+    def insert(self, key: LoRAKey, value=None, chunked=False):
         if self.disable:
             return 0
 
@@ -199,7 +288,7 @@ class LoRARadixCache(BasePrefixCache):
 
         # Radix Cache takes one ref in memory pool
         inserted_key = LoRAKey(lora_id=req.lora_id, token_ids=page_aligned_token_ids)
-        new_prefix_len = self.insert(inserted_key, page_aligned_kv_indices)
+        new_prefix_len = self.insert(inserted_key, page_aligned_kv_indices, chunked=chunked)
         self.token_to_kv_pool_allocator.free(
             kv_indices[len(req.prefix_indices) : new_prefix_len]
         )
@@ -247,6 +336,8 @@ class LoRARadixCache(BasePrefixCache):
 
             if len(x.parent.children) == 0:
                 heapq.heappush(leaves, x.parent)
+            
+            self._record_remove_event(x)
 
     def inc_lock_ref(self, node: LoRATreeNode):
         if self.disable:
@@ -254,7 +345,7 @@ class LoRARadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 0:
+            if node.lock_ref == 0 and node.value is not None:
                 self.evictable_size_ -= len(node.value)
                 self.protected_size_ += len(node.value)
                 delta -= len(node.value)
@@ -268,7 +359,7 @@ class LoRARadixCache(BasePrefixCache):
 
         delta = 0
         while node != self.root_node:
-            if node.lock_ref == 1:
+            if node.lock_ref == 1 and node.value is not None:
                 self.evictable_size_ += len(node.value)
                 self.protected_size_ -= len(node.value)
                 delta += len(node.value)
@@ -323,7 +414,8 @@ class LoRARadixCache(BasePrefixCache):
 
     def _split_node(self, key: LoRAKey, child: LoRATreeNode, split_len: int):
         # new_node -> child
-        new_node = LoRATreeNode()
+        self._record_remove_event(child)
+        new_node = LoRATreeNode(cache=self)
         key_split_1 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[:split_len])
         key_split_2 = LoRAKey(lora_id=key.lora_id, token_ids=key.token_ids[split_len:])
         new_node.children = {self.get_child_key_fn(key_split_2): child}
@@ -331,10 +423,15 @@ class LoRARadixCache(BasePrefixCache):
         new_node.lock_ref = child.lock_ref
         new_node.key = key_split_1
         new_node.value = child.value[:split_len]
+        new_node.agents = copy.deepcopy(child.agents)
         child.parent = new_node
         child.key = key_split_2
         child.value = child.value[split_len:]
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        new_node.hold_priority_version = -1
+        
+        self._record_store_event(new_node)
+        self._record_store_event(child)
 
         return new_node
 
@@ -362,12 +459,17 @@ class LoRARadixCache(BasePrefixCache):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
-            new_node = LoRATreeNode()
+            new_node = LoRATreeNode(cache=self)
             new_node.parent = node
             new_node.key = key
             new_node.value = value
             node.children[child_key] = new_node
             self.evictable_size_ += len(value)
+            new_node.agents = copy.deepcopy(node.agents)
+            new_node.hold_priority_version = -1
+            self._record_store_event(new_node)
+        
+        assert len(node.key) == len(node.value)
         return total_prefix_length
 
     def _print_helper(self, node: LoRATreeNode, indent: int):
@@ -375,11 +477,20 @@ class LoRARadixCache(BasePrefixCache):
         stack = [(node, indent)]
         while stack:
             current_node, current_indent = stack.pop()
+            # 构造agents字符串
+            if current_node.agents:
+                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+            else:
+                agents_str = '{}'
             print(
                 " " * current_indent,
+                "|",
+                # current_node.key[:10],
+                current_node.id,
                 len(current_node.key),
-                current_node.key.token_ids[:10],
+                f"p={current_node.hold_priority}",
                 f"r={current_node.lock_ref}",
+                agents_str
             )
             for key, child in current_node.children.items():
                 stack.append((child, current_indent + 2))
@@ -387,7 +498,7 @@ class LoRARadixCache(BasePrefixCache):
                 assert key == self.get_child_key_fn(
                     child.key
                 ), f"{key=}, {self.get_child_key_fn(child.key)=}"
-
+                
     def _delete_leaf(self, node):
         for k, v in node.parent.children.items():
             if v == node:
@@ -419,3 +530,127 @@ class LoRARadixCache(BasePrefixCache):
                 stack.extend(cur_node.children.values())
 
         return ret_list
+
+    def _record_store_event(self, node: LoRATreeNode):
+        # One BlockStored per ``page_size`` chunk.
+        if self.enable_kv_cache_events:
+            # First chunk links to the last page of the parent node (if any).
+            if node.parent is None or node != self.root_node:
+                parent_block_hash = None
+            else:
+                last_page_start = ((len(node.parent.key) - 1) // self.page_size) * self.page_size
+                parent_parent_tokens = node.parent.key.token_ids[last_page_start:]
+                parent_block_hash = hash((node.parent.key.lora_id, tuple(parent_parent_tokens)))
+
+            for start in range(0, len(node.key), self.page_size):
+                page_tokens = node.key.token_ids[start : start + self.page_size]
+                if not page_tokens:
+                    continue
+
+                block_hash = hash((node.key.lora_id, tuple(page_tokens)))
+
+                self.kv_event_queue.append(
+                    BlockStored(
+                        block_hashes=[block_hash],
+                        parent_block_hash=parent_block_hash,
+                        token_ids=page_tokens,
+                        block_size=len(page_tokens),
+                        lora_id=node.key.lora_id,
+                    )
+                )
+
+                # Chain next chunk to this one.
+                parent_block_hash = block_hash
+
+    def _record_remove_event(self, node: LoRATreeNode):
+        # One BlockRemoved per chunk.
+        if self.enable_kv_cache_events:
+            for start in range(0, len(node.key), self.page_size):
+                page_tokens = node.key.token_ids[start : start + self.page_size]
+                if not page_tokens:
+                    continue
+                block_hash = hash((node.key.lora_id, tuple(page_tokens)))
+                self.kv_event_queue.append(BlockRemoved(block_hashes=[block_hash]))
+
+    def _record_all_cleared_event(self):
+        if self.enable_kv_cache_events:
+            self.kv_event_queue.append(AllBlocksCleared())
+
+    def take_events(self):
+        """Atomically takes all events and clears the queue.
+
+        Returns:
+            A list of KV cache events.
+        """
+        if not self.enable_kv_cache_events:
+            return []
+        events = self.kv_event_queue
+        self.kv_event_queue = []
+        return events
+
+    def _update_agent_to_last_nodes(self, req: Req, last_node: LoRATreeNode):
+        agent_id = req.agent_id
+        
+        if agent_id not in self.agent_manager.agent_to_last_nodes:
+            self.agent_manager.agent_to_last_nodes[agent_id] = set()
+            
+        current_last_nodes = self.agent_manager.agent_to_last_nodes[agent_id]
+        n = last_node
+        # if(n == self.root_node):
+        #     print("damn here's the bug")
+        while n != self.root_node:
+            if n in current_last_nodes and n != last_node:
+                current_last_nodes.remove(n)
+                break
+            n = n.parent
+        should_add = True
+        for n in current_last_nodes:
+            while n != self.root_node:
+                if n == last_node:
+                    should_add = False
+                    break
+                n = n.parent
+            if not should_add:
+                break
+        if should_add:
+            current_last_nodes.add(last_node)
+
+    def _update_leaf_node_priority(self, req: Req, last_node: LoRATreeNode):
+        agent_id = req.agent_id
+        self._update_agent_to_last_nodes(req, last_node)
+        n = last_node
+        if agent_id not in n.agents:
+            n.agents[agent_id] = str(agent_id)
+            n.hold_priority_version = -1
+        #     n.agents[agent_id] = AgentInfo(
+        #         agent_id=agent_id,
+        #         priority=0.0,
+        #         hit_cnt=0,
+        #         last_call_time=time.time(),
+        #         continue_call=0
+        #     )
+        # n.agents[agent_id].hit_cnt += 1
+        # if self.agent_manager.agent_last_node_id == n.id:
+        #     n.agents[agent_id].continue_call += 1
+        # else:
+        #     n.agents[agent_id].continue_call = 1
+        # self.agent_manager.agent_last_node_id = n.id
+        # n.agents[agent_id].last_call_time = time.time()
+        # n.agents[agent_id].update_priority()
+
+    def _update_leaf_node_timestep(self):
+        leaves = self._collect_leaves()
+        logger.debug(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
+        update_dict = self.agent_manager.get_update_dict_agent()
+        update_log = []
+        for leaf in leaves:
+            old_priority = leaf.hold_priority
+            leaf.hold_priority = 1000
+            for agent_id in update_dict.keys():
+                if agent_id in leaf.agents:
+                    leaf.hold_priority = min(leaf.hold_priority, update_dict[agent_id])
+                    update_log.append({"id": leaf.id, "old_priority": old_priority, "new_priority": leaf.hold_priority, "agent_id": agent_id, "agent_priority": update_dict[agent_id]})
+            leaf.hold_priority_version = self.agent_manager.update_version
+        logger.debug(f"[leaves][after] {update_log}")
+        logger.info("[Hold][Update] Leaf node priorities updated.")
+        return

@@ -49,6 +49,10 @@ class SchedulerOutputProcessorMixin:
                 result.extend_input_len_per_req,
                 result.extend_logprob_start_len_per_req,
             )
+            # logger.critical(f"\033[95m[Prefill] {extend_input_len_per_req} next {next_token_ids} logprob {extend_logprob_start_len_per_req}\033[0m")
+            if extend_input_len_per_req is not None:
+                logger.debug(f"\033[95m[Prefill] {sum(extend_input_len_per_req)}\033[0m")
+                self.prefill_token_count += sum(extend_input_len_per_req)
 
             if self.enable_overlap:
                 logits_output, next_token_ids, _ = (
@@ -66,7 +70,7 @@ class SchedulerOutputProcessorMixin:
                         logits_output.input_token_logprobs = tuple(
                             logits_output.input_token_logprobs.tolist()
                         )
-
+            self.time_gpu_start = time.perf_counter()
             hidden_state_offset = 0
 
             # Check finish conditions
@@ -87,11 +91,20 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
+                        prefill_tokens = len(req.origin_input_ids)
+                        decode_tokens = len(req.output_ids)
+                        if prefill_tokens > 0:
+                            ratio = decode_tokens / prefill_tokens
+                            logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
+                        else:
+                            logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
                         self.tree_cache.cache_finished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                         req.time_stats.completion_time = time.time()
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
                         self.tree_cache.cache_unfinished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
 
                     if batch.return_logprob:
                         assert extend_logprob_start_len_per_req is not None
@@ -185,8 +198,10 @@ class SchedulerOutputProcessorMixin:
 
                     if req.finished():
                         self.tree_cache.cache_finished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                     else:
                         self.tree_cache.cache_unfinished_req(req)
+                        self.tree_cache._update_leaf_node_priority(req, req.last_node)
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
@@ -199,6 +214,15 @@ class SchedulerOutputProcessorMixin:
         result: GenerationBatchResult,
         launch_done: Optional[threading.Event] = None,
     ):
+        t0 = time.perf_counter()
+        for r in batch.reqs:
+            if r.ttft_calculated is False:
+                r.ttft_calculated = True
+                if r.init_time is not None and r.start_prefill_time is not None: # and r.waiting_queue_time is not None
+                    self.req_init_ttft.add(t0 - r.init_time)
+                    # self.req_queue_ttft.add(t0 - r.waiting_queue_time)
+                    self.req_prefill_ttft.add(t0 - r.start_prefill_time)
+
         logits_output, next_token_ids, can_run_cuda_graph = (
             result.logits_output,
             result.next_token_ids,
@@ -217,6 +241,7 @@ class SchedulerOutputProcessorMixin:
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
 
+        self.time_gpu_start = time.perf_counter()
         self.token_to_kv_pool_allocator.free_group_begin()
 
         # Check finish condition
@@ -244,9 +269,30 @@ class SchedulerOutputProcessorMixin:
                 # speculative worker will solve the output_ids in speculative decoding
                 req.output_ids.append(next_token_id)
 
+            if next_token_id is not None:
+                logger.debug(f"\033[95m[Decode] {next_token_id}\033[0m")
+                self.decode_token_count += 1
+
+
+
             req.check_finished()
             if req.finished():
+                prefill_tokens = len(req.origin_input_ids)
+                decode_tokens = len(req.output_ids)
+                if prefill_tokens > 0:
+                    ratio = decode_tokens / prefill_tokens
+                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
+                else:
+                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
                 self.tree_cache.cache_finished_req(req)
+                self.tree_cache._update_leaf_node_priority(req, req.last_node)
+                if self.enable_lora:
+                    try:
+                        # Make the finished request's LoRA the first candidate for eviction to reduce churn on others.
+                        success = self.lora_manager.memory_pool.mark_lora_for_eviction(req.lora_id)
+                        logger.warning(f"[lora][priority][success={success}] Marked lora {req.lora_id} for eviction")
+                    except Exception as e:
+                        logger.debug(f"[lora][priority] failed to mark lora {req.lora_id} for eviction: {e}")
                 req.time_stats.completion_time = time.time()
 
             if req.return_logprob and batch.spec_algorithm.is_none():
@@ -722,3 +768,113 @@ class SchedulerOutputProcessorMixin:
                 rids, finished_reasons, embeddings, prompt_tokens, cached_tokens
             )
         )
+
+    def prefetch_agent_timestep(self, prefetch_step: Optional[int] = None):
+        self.tree_cache.cache_controller._clear_outdated_operations(2)
+        print(f"\033[95m[Prefetch] Updating LoRA priority before prefetching...\033[0m")
+        self.lora_manager.memory_pool.update_lora_priority()
+        print(f"\033[95m[Prefetch] LoRA priority updated.\033[0m")
+        self.prefetch_agent = set()
+        self.prefetch_lora = set()
+        self.tree_cache.check_hicache_events()
+        print(f"\033[95m[Prefetch] Starting prefetch_agent_timestep...\033[0m")
+        if self.agent_manager.update_dict_timestep is None:
+            logger.warning("\033[91m update_dict_timestep is None\033[0m")
+            return
+        print(f"\033[95m[Prefetch] update_dict_timestep: {self.agent_manager.update_dict_timestep}\033[0m")
+        p_step = prefetch_step if prefetch_step is not None else self.agent_manager.prefetch_step
+        lora_names = []
+        lora_names.append("lora0")
+        self.prefetch_lora.add("lora0")
+        print(f"\033[95m[Prefetch] Start prefetching up to step: {p_step}\033[0m")
+        try:
+            for step in range(0, p_step+1):
+                print(f"\033[95m[Prefetch] step: {step}\033[0m")
+                last_nodes = []
+                agent_ids = self.agent_manager.update_dict_timestep.get(step, [])
+                print(f"\033[95m[Prefetch] step: {step}, agent_ids: {agent_ids}\033[0m")
+                # TODO: 1. add agent-up-bound-memory    2. strategy of prefetch within different agent priority
+                if agent_ids is None or len(agent_ids) == 0:
+                    logger.critical("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
+                    continue
+                for agent_id in agent_ids:
+                    lora_names.append(f"lora{agent_id}" if int(agent_id) > 0 else "lora0")
+                logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
+                agent_prefetch_statistic = {}
+
+                for agent_id in agent_ids:
+                    to_break = False
+                    if self.server_args.disable_lr_pf is not True:
+                        if int(agent_id) >= 0:
+                            lora_name = f"lora{agent_id}"
+                        else:
+                            # lora_name = "None"
+                            lora_name = "lora0"
+                        to_break = not self.prefetch_lora_timesteps(lora_name, priority=step, step_lora_names=lora_names)
+                        if not to_break:
+                            agent_prefetch_statistic[agent_id] = True
+                            self.prefetch_lora.add(lora_name)
+                        else:
+                            to_break = True
+                            break
+                            
+
+                    if self.server_args.disable_kv_pf is not True:
+                        last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
+                        # 确保 last_nodes 不为 None
+                        if last_nodes is None or len(last_nodes) == 0:
+                            logger.info("\033[95m[Prefetch] step: %s, agent_id: %s, no last_nodes found\033[0m", step, agent_id)
+                            continue
+                        last_nodes_list = [(getattr(node, "id", None), node.evicted) for node in last_nodes]
+                        logger.info(
+                            "\033[95m[Prefetch] step: %s, agent_id: %s, last_nodes: %s\033[0m",
+                            step,
+                            agent_id,
+                            last_nodes_list
+                        )
+                        nodes_to_load = []
+                        nodes_to_load_pri = []
+                        if len(last_nodes) == 0:
+                            continue
+                        for node in last_nodes:
+                            n = node
+                            if n.evicted and not n.loading:
+                                dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
+                                if dv_indices is None:
+                                    to_break = True
+                                elif agent_id not in agent_prefetch_statistic:
+                                    agent_prefetch_statistic[agent_id] = len(dv_indices)
+                                else:
+                                    agent_prefetch_statistic[agent_id] += len(dv_indices)
+
+                            # bug = False
+                            # while n != self.tree_cache.root_node:
+                            #     if n.evicted and not n.loading:
+                            #         if bug == True:
+                            #             logger.error(f"[Load back][Node][bug]   node {n.id}, evicted {n.evicted}, loading {n.loading}")
+                            #             nodes_to_load_pri.append(n)
+                            #         else:
+                            #             nodes_to_load.append(n)
+                            #     else:
+                            #         bug = True
+                            #     n = n.parent
+                            # if len(nodes_to_load) == 0:
+                            #     continue
+                            # for n in reversed(nodes_to_load_pri):
+                            #     dv_indices = self.tree_cache.load_back_node(n, priority=1)
+                            # for n in reversed(nodes_to_load):
+                            #     dv_indices = self.tree_cache.load_back_node(n, priority=step+1)
+                            #     if dv_indices is None:
+                            #         to_break = True
+                            #         break
+                            
+                            if to_break:
+                                break
+
+                        self.tree_cache.load_cache_event.set()
+
+                    # logger.warning(f"[pf = {step}], with each agent prefetch situation: {agent_prefetch_statistic}")
+                if to_break:
+                    break
+        except Exception as e:
+            logger.error(f"\033[91m[Prefetch] Exception: {e}\033[0m")

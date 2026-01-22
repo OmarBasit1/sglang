@@ -383,6 +383,15 @@ class ServerArgs:
     enable_triton_kernel_moe: bool = False
     enable_flashinfer_mxfp4_moe: bool = False
 
+    # For PFEngine Backend
+    load_ahead_step: int = 2
+    evict_pri_level: int = 4
+    self_debug: bool = False
+    disable_prefetch: bool = False
+    disable_lr_pf: bool = False
+    disable_kv_pf: bool = False
+
+
     def __post_init__(self):
         # Check deprecated arguments
         if self.enable_ep_moe:
@@ -2115,6 +2124,39 @@ class ServerArgs:
             action="store_true",
             help="(Deprecated) Enable FlashInfer MXFP4 MoE backend for modelopt_fp4 quant on Blackwell.",
         )
+        parser.add_argument(
+            "--load-ahead-step",
+            type=int,
+            default=ServerArgs.load_ahead_step,
+            help="Step to load ahead when prefetching"
+        )
+        parser.add_argument(
+            "--evict-pri-level",
+            type=int,
+            default=ServerArgs.evict_pri_level,
+            help="Priority level when evicting from leaf nodes"
+        )
+        parser.add_argument(
+            "--self-debug",
+            action="store_true",
+            help="Enable self-debugging"
+        )
+        parser.add_argument(
+            "--disable-prefetch",
+            action="store_true",
+            help="Disable prefetching"
+        )
+        parser.add_argument(
+            "--disable-lr-pf",
+            action="store_true",
+            help="Disable prefetching lora",
+        )
+        parser.add_argument(
+            "--disable-kv-pf",
+            action="store_true",
+            help="Disable prefetching kv",
+        )
+
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -2417,6 +2459,8 @@ class PortArgs:
     tokenizer_ipc_name: str
     # The ipc filename for scheduler (rank 0) to receive inputs from tokenizer (zmq)
     scheduler_input_ipc_name: str
+    # The ipc filename for scheduler (rank 0) to receive control messages (zmq)
+    scheduler_control_ipc_name: str
     # The ipc filename for detokenizer to receive inputs from scheduler (zmq)
     detokenizer_ipc_name: str
 
@@ -2451,6 +2495,7 @@ class PortArgs:
             return PortArgs(
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                scheduler_control_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
@@ -2479,12 +2524,15 @@ class PortArgs:
             if dp_rank is None:
                 # TokenizerManager to DataParallelController
                 scheduler_input_port = port_base + 4
+                scheduler_control_port = port_base + 5
             else:
                 scheduler_input_port = port_base + 4 + 1 + dp_rank
+                scheduler_control_port = port_base + 5 + 1 + dp_rank
 
             return PortArgs(
                 tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
                 scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
+                scheduler_control_ipc_name=f"tcp://{dist_init_host}:{scheduler_control_port}",
                 detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
                 nccl_port=nccl_port,
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",

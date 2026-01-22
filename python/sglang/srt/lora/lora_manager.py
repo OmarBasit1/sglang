@@ -17,7 +17,7 @@
 
 import logging
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-
+import time
 import torch
 
 from sglang.srt.configs.load_config import LoadConfig
@@ -65,6 +65,9 @@ class LoRAManager:
         self.device: torch.device = next(self.base_model.parameters()).device
         self.tp_size: int = tp_size
         self.tp_rank: int = tp_rank
+        
+        self.prepare_lora_time = 0
+        self.last_prepare_lora_time = 0
 
         # LoRA backend for running sgemm kernels
         logger.info(f"Using {lora_backend} as backend of LoRA kernels.")
@@ -204,7 +207,7 @@ class LoRAManager:
         """
         Validate if the LoRA IDs in the batch can be loaded into the current LoRA memory pool.
         """
-        if len(lora_ids) > self.max_loras_per_batch:
+        if len(lora_ids) > self.max_loras_per_batch - 1:
             return False
 
         # skip pinned LoRA check if no pinned LoRA adapters are loaded.
@@ -231,11 +234,32 @@ class LoRAManager:
 
         return required_slots <= mem_pool_vacancy
 
+    def prefetch_lora_weights(self, priority: int = 0, lora_id: str = None, step_lora_ids: List[str] = []) -> bool:
+        """
+        Prefetch LoRA weights from CPU to GPU memory for the given LoRA name.
+        """
+        lora_name = self.memory_pool._lora_registry.get(lora_id, lora_id) if self.memory_pool._lora_registry else lora_id
+        logger.warning(f"\033[94m [lora][Prefetch] \033[0m    Try to prefetch LoRA adapter weights: {lora_name} with priority {priority}, step lora ids is in info level")
+        logger.info(f"\033[94m [lora][Prefetch] \033[0m    step_lora_ids: {step_lora_ids}")
+        success = self.memory_pool.prefetch_lora_weights(
+            lora_id=lora_id,
+            priority=priority,
+            step_lora_ids=step_lora_ids,
+            lora_adapters=self.loras,
+            lora_modules=self.lora_modules,
+            lora_refs=self.lora_refs.copy(),  # copy snapshot of current lora_refs to avoid mutation during the prefetch.
+        )
+        return success
+        
     def prepare_lora_batch(self, forward_batch: ForwardBatch):
 
+        t0 = time.perf_counter()
         # Load active loras into lora memory pool
         cur_uids = set(forward_batch.lora_ids)
-
+        cur_names = []
+        for id in forward_batch.lora_ids:
+            cur_names.append(self.memory_pool._lora_registry.get(id, id) if self.memory_pool._lora_registry else id)
+        logger.info(f"\033[94m [lora][Prepare]\033[0m Preparing LoRA batch with LoRA IDs: {cur_names}")
         assert len(cur_uids) <= self.max_loras_per_batch
         self.memory_pool.prepare_lora_batch(
             cur_uids=cur_uids,
@@ -256,6 +280,7 @@ class LoRAManager:
             Transfer adapter metadata (weight indices, LoRA rank, scalings) from host
             to device (CUDA) asynchronously.
             """
+            t1 = time.perf_counter()
             weight_indices = [0] * len(forward_batch.lora_ids)
             lora_ranks = [0] * self.max_loras_per_batch
             scalings = [0] * self.max_loras_per_batch
@@ -285,6 +310,7 @@ class LoRAManager:
             scalings_out[: self.max_loras_per_batch].copy_(
                 scalings_tensor, non_blocking=True
             )
+            logger.debug(f"Transfer adapter info takes {time.perf_counter()-t1:.6f} seconds")
 
         if (
             hasattr(self, "max_bs_in_cuda_graph")
@@ -343,6 +369,8 @@ class LoRAManager:
                 scalings=scalings,
             )
         self.lora_backend.set_batch_info(batch_info)
+
+        self.prepare_lora_time += time.perf_counter() - t0
 
     def update_lora_info(self):
         """
@@ -515,3 +543,9 @@ class LoRAManager:
                 self.lora_modules[layer_id][module_name] = self.set_lora_module(
                     module_name, module
                 )
+
+    def get_and_update_lora_time(self):
+        delta_prepare = self.prepare_lora_time - self.last_prepare_lora_time
+        self.last_prepare_lora_time = self.prepare_lora_time
+        delta_load = self.memory_pool.get_and_update_pure_lora_load_time()
+        return delta_prepare, delta_load

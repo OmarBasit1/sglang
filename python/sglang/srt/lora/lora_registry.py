@@ -59,14 +59,15 @@ class LoRARegistry:
     update / eventual consistency model between the tokenizer manager process and the scheduler processes.
     """
 
-    def __init__(self, lora_paths: Optional[List[LoRARef]] = None):
+    def __init__(self, lora_paths: Optional[List[LoRARef]] = None, update_callback=None):
         assert lora_paths is None or all(
             isinstance(lora, LoRARef) for lora in lora_paths
         ), (
             "server_args.lora_paths should have been normalized to LoRARef objects during server initialization. "
             "Please file an issue if you see this error."
         )
-
+        
+        self.update_callback = update_callback
         # A read-write lock to ensure adapters loading / unloading operations are exclusive.
         # Please note that the counter increment/decrement operations are not synchronized through this
         # lock, as they are designed to be non-blocking and can be performed concurrently.
@@ -80,6 +81,7 @@ class LoRARegistry:
         if lora_paths:
             for lora_ref in lora_paths:
                 self._register_adapter(lora_ref)
+
 
     async def register(self, lora_ref: LoRARef):
         """
@@ -197,6 +199,11 @@ class LoRARegistry:
             )
         self._registry[lora_ref.lora_name] = lora_ref
         self._counters[lora_ref.lora_id] = ConcurrentCounter()
+        
+        update_registry_dict, update_counter_dict = self._get_update_dict()
+        print(f"[lora][registry][TokenManager] Updated LoRA registry")
+        self.update_callback(update_registry_dict)
+        
         return lora_ref
 
     @property
@@ -205,3 +212,11 @@ class LoRARegistry:
         Returns the total number of LoRA adapters currently registered.
         """
         return len(self._registry)
+
+    def _get_update_dict(self) -> tuple[Dict[str, str], Dict[str, int]]:
+        """
+        Returns a dictionary mapping from LoRA names to LoRA IDs for all registered LoRA adapters.
+        """
+        dict1 = {name: ref.lora_id for name, ref in self._registry.items()}
+        dict2 = {name: self._counters[ref.lora_id].value for name, ref in self._registry.items()}
+        return dict1, dict2

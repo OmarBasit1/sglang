@@ -294,3 +294,10 @@ class TpModelWorkerClient:
     def __delete__(self):
         self.input_queue.put((None, None))
         self.copy_queue.put((None, None, None))
+
+    def get_gpu_time(self):
+        return self.worker.get_gpu_time()
+
+    def reset_gpu_time(self):
+        self.worker.reset_gpu_time()
+

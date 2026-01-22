@@ -350,8 +350,8 @@ class MHATokenToKVPool(KVCache):
         # note: get_key_buffer is hooked with synchronization for layer-wise KV cache loading
         # it is supposed to be used only by attention backend not for information purpose
         # same applies to get_value_buffer and get_kv_buffer
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        # if self.layer_transfer_counter is not None:
+            # self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
         return self._get_key_buffer(layer_id)
 
@@ -362,8 +362,8 @@ class MHATokenToKVPool(KVCache):
         return self.v_buffer[layer_id - self.start_layer]
 
     def get_value_buffer(self, layer_id: int):
-        if self.layer_transfer_counter is not None:
-            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+        # if self.layer_transfer_counter is not None:
+            # self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
         return self._get_value_buffer(layer_id)
 
     def get_kv_buffer(self, layer_id: int):

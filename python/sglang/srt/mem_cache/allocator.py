@@ -62,6 +62,35 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
     def available_size(self):
         return (len(self.free_pages) + len(self.release_pages)) * self.page_size
 
+    @abc.abstractmethod
+    def allocated_pages(self):
+        """Get the number of allocated pages."""
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def total_pages(self):
+        """Get the total number of pages."""
+        raise NotImplementedError()
+
+    def get_memory_stats(self):
+        """Get comprehensive memory statistics."""
+        available_pages = len(self.free_pages) + len(self.release_pages)
+        allocated_pages = self.allocated_pages()
+        total_pages = self.total_pages()
+        
+        return {
+            "total_pages": total_pages,
+            "allocated_pages": allocated_pages,
+            "available_pages": available_pages,
+            "free_pages": len(self.free_pages),
+            "release_pages": len(self.release_pages),
+            "page_size": self.page_size,
+            "total_size": total_pages * self.page_size,
+            "allocated_size": allocated_pages * self.page_size,
+            "available_size": available_pages * self.page_size,
+            "utilization_rate": allocated_pages / total_pages if total_pages > 0 else 0.0
+        }
+
     def get_kvcache(self):
         return self._kvcache
 
@@ -141,6 +170,14 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     def available_size(self):
         # To avoid minor "len(free_pages) * 1" overhead
         return len(self.free_pages) + len(self.release_pages)
+
+    def allocated_pages(self):
+        """Get the number of allocated pages (same as allocated_size for TokenToKVPoolAllocator)."""
+        return self.size - self.available_size()
+
+    def total_pages(self):
+        """Get the total number of pages."""
+        return self.size
 
     def alloc(self, need_size: int):
         if self.need_sort and need_size > len(self.free_pages):

@@ -142,6 +142,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
+            agent_id=request.agent_id,
         )
 
         return adapted_request, request

@@ -251,6 +251,9 @@ class HiCacheController:
         self.page_size = page_size
         self.io_backend = io_backend
         self.enable_storage = False
+        
+        self.load_kv_time = 0
+        self.last_load_kv_time = 0
 
         if storage_backend is not None:
             self.storage_backend_type = storage_backend
@@ -338,6 +341,7 @@ class HiCacheController:
         self.write_queue = PriorityQueue()
         self.load_queue = PriorityQueue()
 
+        self.interrupt_queue = Queue()
         self.ack_write_queue = Queue()
         self.ack_load_queue = Queue()
 
@@ -376,6 +380,9 @@ class HiCacheController:
 
             self.prefetch_thread.start()
             self.backup_thread.start()
+        
+        self.loading_time = 0
+        self.print_flag = 0
 
     def _generate_storage_config(
         self,
@@ -419,6 +426,7 @@ class HiCacheController:
 
         self.write_queue.queue.clear()
         self.load_queue.queue.clear()
+        self.interrupt_queue.queue.clear()
         self.write_buffer.clear()
         self.load_buffer.clear()
         self.ack_write_queue.queue.clear()
@@ -485,9 +493,12 @@ class HiCacheController:
         self.mem_pool_host.protect_load(host_indices)
         # to ensure the device indices are ready before accessed by another CUDA stream
         torch.cuda.current_stream().synchronize()
-        self.load_queue.put(
-            CacheOperation(host_indices, device_indices, node_id, priority)
-        )
+        op = CacheOperation(host_indices, device_indices, node_id, priority)
+        duplicated = self._check_load_queue(op)
+        self.load_queue.put(op)
+        if priority <= 1:
+            logger.info(f"\033[91m[Ctrl]    Load operation {op.id} for node {node_id}, priority: {priority}\033[0m")
+            self.interrupt_queue.put({"type": "interrupt", "priority": priority})
         return device_indices
 
     def move_indices(self, host_indices, device_indices):
@@ -525,48 +536,144 @@ class HiCacheController:
             except Exception as e:
                 logger.error(e)
 
+    # def load_thread_func_layer_by_layer(self):
+    #     """
+    #     Load KV caches from host memory to device memory layer by layer.
+    #     """
+    #     torch.cuda.set_stream(self.load_stream)
+    #     while not self.stop_event.is_set():
+    #         self.load_cache_event.wait(timeout=1)
+    #         if not self.load_cache_event.is_set():
+    #             continue
+    #         self.load_cache_event.clear()
+    #         self.layer_done_counter.update_producer()
+
+    #         batch_operation = None
+    #         while self.load_queue.qsize() > 0:
+    #             op = self.load_queue.get(block=True)
+    #             if batch_operation is None:
+    #                 batch_operation = op
+    #             else:
+    #                 batch_operation.merge(op)
+    #         if batch_operation is None:
+    #             continue
+
+    #         # start layer-wise KV cache transfer from CPU to GPU
+    #         self.layer_done_counter.reset()
+    #         host_indices, device_indices = self.move_indices(
+    #             batch_operation.host_indices, batch_operation.device_indices
+    #         )
+    #         for i in range(self.mem_pool_host.layer_num):
+    #             self.mem_pool_host.load_to_device_per_layer(
+    #                 self.mem_pool_device,
+    #                 host_indices,
+    #                 device_indices,
+    #                 i,
+    #                 self.io_backend,
+    #             )
+    #             self.load_stream.synchronize()
+    #             self.layer_done_counter.increment()
+
+    #         self.mem_pool_host.complete_io(batch_operation.host_indices)
+    #         for node_id in batch_operation.node_ids:
+    #             if node_id != 0:
+    #                 self.ack_load_queue.put(node_id)
+
     def load_thread_func_layer_by_layer(self):
         """
         Load KV caches from host memory to device memory layer by layer.
         """
         torch.cuda.set_stream(self.load_stream)
-        while not self.stop_event.is_set():
-            self.load_cache_event.wait(timeout=1)
-            if not self.load_cache_event.is_set():
-                continue
-            self.load_cache_event.clear()
-            self.layer_done_counter.update_producer()
+        with self.load_stream:
+            while not self.stop_event.is_set():
+                operation = None
+                # self.load_cache_event.wait(timeout=1)
+                # if self.load_cache_event.is_set():
+                #     operation = self.load_queue.get(block=True)
+                #     self.load_cache_event.clear()
+                #     self.layer_done_counter.update_producer()
+                # else:
+                #     operation = None
 
-            batch_operation = None
-            while self.load_queue.qsize() > 0:
-                op = self.load_queue.get(block=True)
-                if batch_operation is None:
-                    batch_operation = op
-                else:
-                    batch_operation.merge(op)
-            if batch_operation is None:
-                continue
+                try:
+                    operation = self.load_queue.get(block=True, timeout=1.0)
+                    logger.info(f"\033[95mLoaded operation from queue\033[0m")
+                except:
+                    operation = None
 
-            # start layer-wise KV cache transfer from CPU to GPU
-            self.layer_done_counter.reset()
-            host_indices, device_indices = self.move_indices(
-                batch_operation.host_indices, batch_operation.device_indices
-            )
-            for i in range(self.mem_pool_host.layer_num):
-                self.mem_pool_host.load_to_device_per_layer(
-                    self.mem_pool_device,
-                    host_indices,
-                    device_indices,
-                    i,
-                    self.io_backend,
-                )
-                self.load_stream.synchronize()
-                self.layer_done_counter.increment()
 
-            self.mem_pool_host.complete_io(batch_operation.host_indices)
-            for node_id in batch_operation.node_ids:
-                if node_id != 0:
-                    self.ack_load_queue.put(node_id)
+                is_interrupt = False
+                interrupted_operation = []
+                try:
+                    is_interrupt = self._check_interrupt_signal(operation)
+                    if is_interrupt == True:
+                        if operation is not None:
+                            interrupted_operation.append(operation)
+                            logger.warning(f"\033[93m[Interrupt]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                        self._handle_outdated_operations(interrupted_operation)
+                    if operation is None or is_interrupt == True:
+                        continue
+                        
+                    t0 = time.perf_counter()
+                    
+                    while self.load_queue.qsize() > 0:
+                        op = self.load_queue.get(block=True)
+                        if op.priority == operation.priority:
+                            operation.merge(op)
+                        else:
+                            self.load_queue.put(op)
+                            break
+
+                    t1 = time.perf_counter()
+                    is_interrupt = False
+                    self.layer_done_counter.reset()
+                    host_indices, device_indices = self.move_indices(operation.host_indices, operation.device_indices)
+
+                    for layer_i in range(self.mem_pool_host.layer_num):
+                        is_interrupt = self._check_interrupt_signal(operation)
+                        if is_interrupt:
+                            interrupted_operation = [operation]
+                            logger.warning(f"\033[93m[Interrupt][layer_{layer_i}]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                            self._handle_outdated_operations(interrupted_operation)
+                            break
+                        self.mem_pool_host.load_to_device_per_layer(
+                            self.mem_pool_device,
+                            host_indices,
+                            device_indices,
+                            layer_i,
+                            self.io_backend,
+                        )
+                        self.load_stream.synchronize()
+                        self.layer_done_counter.increment()
+
+                    t2 = time.perf_counter()
+                    logger.warning(f"[CC][is_interrupt = {is_interrupt}]    time = {t2 - t1}, node {operation.node_ids}, priority: {operation.priority}")
+                    if operation.priority == 0:
+                        self.loading_time = 0
+                    else:
+                        if self.print_flag != operation.priority:
+                            self.print_flag = operation.priority
+                            logger.warning(f"[CC][all]    Loading time for priority {operation.priority}: {self.loading_time}")
+                            self.loading_time = 0
+                        else:
+                            self.loading_time += t2 - t1
+                    self.print_flag = operation.priority
+
+                    if is_interrupt:
+                        continue
+
+                    self.mem_pool_host.complete_io(operation.host_indices)
+                    for node_id in operation.node_ids:
+                        if node_id != 0:
+                            self.ack_load_queue.put(node_id)
+
+                    self.load_kv_time += time.perf_counter() - t0
+                    logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
+                    
+                except Exception as e:
+                    logger.error(f"Error during load operation: {e}")
+                    interrupted_operation = [operation]
+                    self._handle_outdated_operations(interrupted_operation)
 
     def evict_device(
         self, device_indices: torch.Tensor, host_indices: torch.Tensor
@@ -888,3 +995,80 @@ class HiCacheController:
 
             except Empty:
                 continue
+
+    def _check_interrupt_signal(self, operation) -> bool:
+        """
+        - Check whether there's interrupt signal
+        - Compare the priority
+        """
+        try:
+            interrupt_signal = self.interrupt_queue.get(block=False)
+            if interrupt_signal is not None:
+                logger.debug(f"have interrupt")
+            cur_op_priority = operation.priority if operation is not None else 2
+            logger.debug(f"check interrupt with op: {cur_op_priority}")
+            if interrupt_signal is None or cur_op_priority == 0:
+                return False
+            self.interrupt_queue.queue.clear()
+            _type = interrupt_signal["type"]
+            _priority = interrupt_signal["priority"]
+            logger.debug(f"check interrupt with interrupt: {_priority}")
+            if _type == "interrupt":
+                if _priority == 0:
+                    return True
+                # if _priority > 1 or (_priority == 1 and cur_op_priority <= 1):
+                #     return False
+                # else:
+                #     # raise ValueError(f"Interrupt signal {interrupt_signal} is not valid")
+                #     return True
+        except:
+            return False
+        
+    def _check_load_queue(self, op: CacheOperation) -> int:
+        for item in self.load_queue.queue:
+            if op.node_ids[0] in item.node_ids:
+                if item.priority <= op.priority:
+                    logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with same priority. Ignore the followed not enough memory.\033[0m")
+                    return 1
+                else:
+                    # self.load_queue.queue.remove(item)
+                    logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with lower priority. Ignore the followed not enough memory.\033[0m")
+                    return 2
+        return 0
+
+    def _handle_outdated_operations(self, outdated_operations: list[CacheOperation]):
+        """
+        deal with the outdated operations that should be cleaned
+
+        Args:
+            outdated_operations: list of outdated operations
+        """
+        for operation in outdated_operations:
+            self.mem_pool_host.complete_io(operation.host_indices)
+
+        for operation in reversed(outdated_operations):
+            for node_id in operation.node_ids:
+                if node_id != 0:
+                    self.ack_load_queue.put({"node_id": node_id, "success": False})
+
+        logger.info(f"Handled {len(outdated_operations)} outdated operations in reverse order")
+
+    def _clear_outdated_operations(self, threshold: int):
+        outdated_operations = []
+        remaining_operations = []
+        with self.load_queue.mutex:
+            while self.load_queue.queue:
+                op = self.load_queue.queue.pop(0)
+                if op.priority >= threshold:
+                    outdated_operations.append(op)
+                else:
+                    remaining_operations.append(op)
+            self.load_queue.queue.extend(remaining_operations)
+        if outdated_operations:
+            self._handle_outdated_operations(outdated_operations)
+    
+    def get_and_update_load_time(self):
+        delta = self.load_kv_time - self.last_load_kv_time
+        self.last_load_kv_time = self.load_kv_time
+        return delta
+    

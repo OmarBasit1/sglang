@@ -79,6 +79,7 @@ class HostKVCache(abc.ABC):
         self.start_layer = device_pool.start_layer
         self.end_layer = device_pool.end_layer
 
+        logger.warning(f"device size: {device_pool.size}, host size: {self.size}")
         assert (
             self.size > device_pool.size
         ), "The host memory should be larger than the device memory with the current protocol"
