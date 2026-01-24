@@ -5,6 +5,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
+from sglang.srt.entrypoints.benchmarking import BenchmarkRequestTracker, benchmarker
 from sglang.srt.code_completion_parser import generate_completion_prompt_from_request
 from sglang.srt.entrypoints.openai.protocol import (
     CompletionRequest,
@@ -174,6 +175,10 @@ class OpenAIServingCompletion(OpenAIServingBase):
         cached_tokens = {}
         hidden_states = {}
 
+        benchmark_trackers: dict[int, BenchmarkRequestTracker] | None = (
+            {} if benchmarker.is_active() else None
+        )
+
         try:
             async for content in self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
@@ -185,6 +190,16 @@ class OpenAIServingCompletion(OpenAIServingBase):
                 completion_tokens[index] = content["meta_info"]["completion_tokens"]
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
+
+                if benchmark_trackers is not None:
+                    tracker = benchmark_trackers.get(index)
+                    if tracker is None:
+                        tracker = BenchmarkRequestTracker()
+                        benchmark_trackers[index] = tracker
+                    tracker.update(
+                        prompt_tokens=content["meta_info"].get("prompt_tokens"),
+                        completion_tokens=content["meta_info"].get("completion_tokens"),
+                    )
 
                 stream_buffer = stream_buffers.get(index, "")
                 # Handle echo for first chunk
@@ -293,6 +308,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
         except Exception as e:
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        finally:
+            if benchmark_trackers is not None:
+                for tracker in benchmark_trackers.values():
+                    try:
+                        benchmarker.add_metrics(tracker.finish())
+                    except Exception:
+                        pass
 
         yield "data: [DONE]\n\n"
 
@@ -303,6 +325,41 @@ class OpenAIServingCompletion(OpenAIServingBase):
         raw_request: Request,
     ) -> Union[CompletionResponse, ErrorResponse, ORJSONResponse]:
         """Handle non-streaming completion request"""
+        if benchmarker.is_active():
+            original_stream = adapted_request.stream
+            adapted_request.stream = True
+            trackers: dict[int, BenchmarkRequestTracker] = {}
+            last_by_index: dict[int, Dict[str, Any]] = {}
+            try:
+                async for content in self.tokenizer_manager.generate_request(
+                    adapted_request, raw_request
+                ):
+                    index = content.get("index", 0)
+                    last_by_index[index] = content
+                    tracker = trackers.get(index)
+                    if tracker is None:
+                        tracker = BenchmarkRequestTracker()
+                        trackers[index] = tracker
+                    tracker.update(
+                        prompt_tokens=content["meta_info"].get("prompt_tokens"),
+                        completion_tokens=content["meta_info"].get("completion_tokens"),
+                    )
+
+                if not last_by_index:
+                    raise ValueError("Empty completion result")
+                ret = [last_by_index[i] for i in sorted(last_by_index)]
+                response = self._build_completion_response(request, ret, int(time.time()))
+                for tracker in trackers.values():
+                    try:
+                        benchmarker.add_metrics(tracker.finish())
+                    except Exception:
+                        pass
+                return response
+            except ValueError as e:
+                return self.create_error_response(str(e))
+            finally:
+                adapted_request.stream = original_stream
+
         try:
             generator = self.tokenizer_manager.generate_request(
                 adapted_request, raw_request

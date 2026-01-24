@@ -51,6 +51,7 @@ from sglang.srt.disaggregation.utils import (
     register_disaggregation_server,
 )
 from sglang.srt.entrypoints.engine import _launch_subprocesses
+from sglang.srt.entrypoints.benchmarking import benchmarker
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     CompletionRequest,
@@ -961,6 +962,17 @@ async def continue_generation(request: Request):
 
 
 ##### OpenAI-compatible API endpoints #####
+
+
+@app.get("/start_benchmark")
+async def start_benchmark() -> Response:
+    benchmarker.start_benchmark()
+    return Response(status_code=200)
+
+
+@app.get("/stop_benchmark")
+async def stop_benchmark() -> ORJSONResponse:
+    return ORJSONResponse(content=benchmarker.stop_benchmark(), status_code=200)
 
 
 @app.post("/v1/completions", dependencies=[Depends(validate_json_request)])

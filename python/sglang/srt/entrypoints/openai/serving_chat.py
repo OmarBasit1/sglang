@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
+from sglang.srt.entrypoints.benchmarking import BenchmarkRequestTracker, benchmarker
 from sglang.srt.conversation import generate_chat_conv
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -38,6 +39,7 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.reasoning_parser import ReasoningParser
+from sglang.srt.utils import get_bool_env_var
 from sglang.utils import convert_json_schema_to_str
 
 logger = logging.getLogger(__name__)
@@ -193,6 +195,28 @@ class OpenAIServingChat(OpenAIServingBase):
         is_multimodal: bool,
     ) -> MessageProcessingResult:
         """Apply Jinja chat template"""
+        if not get_bool_env_var("HELIUM_VLLM_ENABLE_THINKING", default="true"):
+            if request.chat_template_kwargs is None:
+                request.chat_template_kwargs = {}
+            if (
+                request.chat_template_kwargs.get("enable_thinking") is None
+                and request.chat_template_kwargs.get("thinking") is None
+            ):
+                model_type = ""
+                hf_config = getattr(self.tokenizer_manager.model_config, "hf_config", None)
+                if hf_config is not None:
+                    model_type = str(getattr(hf_config, "model_type", "")).lower()
+
+                model_name = str(
+                    getattr(request, "model", None)
+                    or getattr(self.tokenizer_manager, "served_model_name", "")
+                ).lower()
+
+                if "qwen3" in model_type or "qwen3" in model_name:
+                    request.chat_template_kwargs["enable_thinking"] = False
+                elif "deepseek" in model_type or "deepseek" in model_name:
+                    request.chat_template_kwargs["thinking"] = False
+
         prompt = ""
         prompt_ids = []
         openai_compatible_messages = []
@@ -464,6 +488,10 @@ class OpenAIServingChat(OpenAIServingBase):
         cached_tokens = {}
         hidden_states = {}
 
+        benchmark_trackers: dict[int, BenchmarkRequestTracker] | None = (
+            {} if benchmarker.is_active() else None
+        )
+
         try:
             async for content in self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
@@ -474,6 +502,16 @@ class OpenAIServingChat(OpenAIServingBase):
                 completion_tokens[index] = content["meta_info"]["completion_tokens"]
                 cached_tokens[index] = content["meta_info"].get("cached_tokens", 0)
                 hidden_states[index] = content["meta_info"].get("hidden_states", None)
+
+                if benchmark_trackers is not None:
+                    tracker = benchmark_trackers.get(index)
+                    if tracker is None:
+                        tracker = BenchmarkRequestTracker()
+                        benchmark_trackers[index] = tracker
+                    tracker.update(
+                        prompt_tokens=content["meta_info"]["prompt_tokens"],
+                        completion_tokens=content["meta_info"]["completion_tokens"],
+                    )
 
                 # Handle logprobs
                 choice_logprobs = None
@@ -653,6 +691,13 @@ class OpenAIServingChat(OpenAIServingBase):
         except ValueError as e:
             error = self.create_streaming_error_response(str(e))
             yield f"data: {error}\n\n"
+        finally:
+            if benchmark_trackers is not None:
+                for tracker in benchmark_trackers.values():
+                    try:
+                        benchmarker.add_metrics(tracker.finish())
+                    except Exception:
+                        pass
 
         yield "data: [DONE]\n\n"
 
@@ -663,6 +708,42 @@ class OpenAIServingChat(OpenAIServingBase):
         raw_request: Request,
     ) -> Union[ChatCompletionResponse, ErrorResponse, ORJSONResponse]:
         """Handle non-streaming chat completion request"""
+        if benchmarker.is_active():
+            original_stream = adapted_request.stream
+            adapted_request.stream = True
+            trackers: dict[int, BenchmarkRequestTracker] = {}
+            last_by_index: dict[int, Dict[str, Any]] = {}
+            try:
+                async for content in self.tokenizer_manager.generate_request(
+                    adapted_request, raw_request
+                ):
+                    index = content.get("index", 0)
+                    last_by_index[index] = content
+
+                    tracker = trackers.get(index)
+                    if tracker is None:
+                        tracker = BenchmarkRequestTracker()
+                        trackers[index] = tracker
+                    tracker.update(
+                        prompt_tokens=content["meta_info"].get("prompt_tokens"),
+                        completion_tokens=content["meta_info"].get("completion_tokens"),
+                    )
+
+                if not last_by_index:
+                    raise ValueError("Empty chat completion result")
+                ret = [last_by_index[i] for i in sorted(last_by_index)]
+                response = self._build_chat_response(request, ret, int(time.time()))
+                for tracker in trackers.values():
+                    try:
+                        benchmarker.add_metrics(tracker.finish())
+                    except Exception:
+                        pass
+                return response
+            except ValueError as e:
+                return self.create_error_response(str(e))
+            finally:
+                adapted_request.stream = original_stream
+
         try:
             ret = await self.tokenizer_manager.generate_request(
                 adapted_request, raw_request
