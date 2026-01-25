@@ -522,7 +522,7 @@ class RadixCache(BasePrefixCache):
             current_node, current_indent = stack.pop()
             # 构造agents字符串
             if current_node.agents:
-                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+                agents_str = '{' + ', '.join(f'({k}:{v})' for k, v in current_node.agents.items()) + '}'
             else:
                 agents_str = '{}'
             print(

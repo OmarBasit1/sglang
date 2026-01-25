@@ -776,7 +776,7 @@ class Scheduler(
                     enable_kv_cache_events=self.enable_kv_cache_events,
                     agent_manager=self.agent_manager,
                 )
-        logger.warning(f"tree cache: {self.tree_cache}")
+        # logger.warning(f"tree cache: {self.tree_cache}")
         self.decode_mem_cache_buf_multiplier = (
             1
             if self.spec_algorithm.is_none()
@@ -900,7 +900,7 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
-        logger.critical("\033[91m   Using normal event loop\033[0m")
+        # logger.critical("\033[91m   Using normal event loop\033[0m")
         while True:
             recv_reqs = self.recv_requests()
 
@@ -918,7 +918,7 @@ class Scheduler(
                     self.is_idle = False
                     if self.new_timestep == True:
                         self.new_timestep = False
-                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
+                        # logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
                     else:
                         self.time_get_other_batch += time.perf_counter() - self.idle_start_time
                 t1 = time.perf_counter()
@@ -964,7 +964,7 @@ class Scheduler(
                     self.is_idle = False
                     if self.new_timestep == True:
                         self.new_timestep = False
-                        logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
+                        # logger.critical("\033[95m   [BD] New Timestep, Start to Count   \033[0m")
                     else:
                         self.time_get_other_batch += time.perf_counter() - self.idle_start_time
                 batch.launch_done = threading.Event()
@@ -1018,7 +1018,7 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_pp(self):
         """A non-overlap scheduler loop for pipeline parallelism."""
-        logger.critical("\033[91m   Using overlap event loop\033[0m")
+        # logger.critical("\033[91m   Using overlap event loop\033[0m")
         mbs = [None] * self.pp_size
         last_mbs = [None] * self.pp_size
         self.running_mbs = [
@@ -1934,13 +1934,13 @@ class Scheduler(
                 loading_status = self.tree_cache.get_node_chain_status(req.last_host_node)
                 if self.agent_call_time == 0:
                     self.agent_call_time = time.perf_counter()
-                logger.warning(f"[aid: {req.agent_id}][len {len(waiting_queue_iter)}][time: {time.perf_counter() - self.agent_call_time:.4f}] Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
+                # logger.warning(f"[aid: {req.agent_id}][len {len(waiting_queue_iter)}][time: {time.perf_counter() - self.agent_call_time:.4f}] Request {req.rid} Node {req.last_host_node.id} evicted {req.last_host_node.evicted} loading {req.last_host_node.loading} loading status: {loading_status}")
                 if loading_status == self.tree_cache.REQ_IS_EVICTED:
-                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Evict] Request {req.rid} Node {req.last_host_node.id}")
+                    # logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Evict] Request {req.rid} Node {req.last_host_node.id}")
                     self.tree_cache.load_back(req.last_host_node, priority=0, check_reserve=True)
                     continue
                 elif loading_status == self.tree_cache.REQ_IS_LOADING:
-                    logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Loading] Request {req.rid} Node {req.last_host_node.id}")
+                    # logger.warning(f"=-=-=-=-=-[Scheduler][Load Back][Loading] Request {req.rid} Node {req.last_host_node.id}")
                     continue
 
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
@@ -1962,8 +1962,8 @@ class Scheduler(
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
         if len(can_run_list) == 0:
-            logger.warning(f"can run list is 0, batch is full = {self.running_batch.batch_is_full}")
-            logger.warning(f"available size: {self.token_to_kv_pool_allocator.available_size()}")
+            # logger.warning(f"can run list is 0, batch is full = {self.running_batch.batch_is_full}")
+            # logger.warning(f"available size: {self.token_to_kv_pool_allocator.available_size()}")
             return None
 
         if self.enable_metrics:
@@ -2909,16 +2909,16 @@ class Scheduler(
                 if recv_req is None:
                     logger.error("Received None for agent timestep update request")
                     return
-                print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                # print(f"Received agent timestep update request: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.agent_manager.update_agent_timestep(recv_req.agent_data, recv_req.timestep_data)
-                print(f"Updated agent timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                # print(f"Updated agent timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 self.tree_cache._update_leaf_node_timestep()
-                print(f"Updated leaf node timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
+                # print(f"Updated leaf node timestep data: {recv_req.agent_data}, {recv_req.timestep_data}, {recv_req.timestep_cnt}")
                 # if self.server_args.enable_hierarchical_cache:
                 #     self.tree_cache.hi_pretty_print(node=self.tree_cache.root_node, indent=0)
                 # else:
                 #     self.tree_cache.pretty_print()
-                logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
+                # logger.critical(f"\033[94m UPDATE \033[0m: Activate Agent: {self.activate_agent}, Prefetch Agent: {self.prefetch_agent}, Prefetch LoRA: {self.prefetch_lora}")
                 if self.server_args.enable_hierarchical_cache:
                     kv_before = self.tree_cache.cache_controller.get_and_update_load_time()
                 if not self.server_args.disable_prefetch:
@@ -2929,23 +2929,23 @@ class Scheduler(
                 # self.lora_manager.memory_pool.print_buffer_status()
                 rate = (self.decode_token_count - self.last_decode_token_count) / (self.prefill_token_count - self.last_prefill_token_count) if (self.prefill_token_count - self.last_prefill_token_count) > 0 else -1
                 rate_all = self.decode_token_count / self.prefill_token_count if self.prefill_token_count > 0 else -1
-                logger.critical(f"\033[94m TOKENN \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
-                if self.server_args.enable_hierarchical_cache:
-                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {kv_before} / {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
-                else:
-                    logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
+                # logger.critical(f"\033[94m TOKENN \033[0m:  Prefill Token: this={self.prefill_token_count - self.last_prefill_token_count} / all={self.prefill_token_count}, Decode Token: this={self.decode_token_count - self.last_decode_token_count} / all={self.decode_token_count}, rate = this={rate:.4f} / all={rate_all:.4f}")
+                # if self.server_args.enable_hierarchical_cache:
+                    # logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}] [KV {kv_before} / {self.tree_cache.cache_controller.get_and_update_load_time():.6f}]")
+                # else:
+                    # logger.critical(f"\033[94m BEFORE \033[0m:  [PREPARE {self.time_get_batch - self.last_time_get_batch:.4f}][Prefill {self.time_get_prefill_batch - self.last_time_get_prefill_batch:.4f}] [Other {self.time_get_other_batch - self.last_time_get_other_batch:.4f}] [PROCESS {self.time_process_result - self.last_time_process_result:.4f}]")
                 # logger.critical(f"\033[94m GPURUN \033[0m:  [LORA {self.lora_manager.get_and_update_lora_time()}] [GPU+Process {self.time_gpu - self.last_time_gpu:.4f} / {self.time_gpu:.4f}](Prefill={self.time_gpu_prefill - self.last_time_gpu_prefill:.4f} / {self.time_gpu_prefill:.4f})(Decode={self.time_gpu_decode - self.last_time_gpu_decode:.4f} / {self.time_gpu_decode:.4f})")
                 g0, g1, g2 = self.tp_worker.get_gpu_time()
-                logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
+                # logger.critical(f"\033[94m GPURUN \033[0m:  [TP GPU {g0:.4f}](Prefill {g1:.4f})(Decode={g2:.4f})")
                 self.tp_worker.reset_gpu_time()
                 init_ttft = sum(self.req_init_ttft) / len(self.req_init_ttft) if len(self.req_init_ttft) > 0 else 0
                 queue_ttft = sum(self.req_queue_ttft) / len(self.req_queue_ttft) if len(self.req_queue_ttft) > 0 else 0
                 prefill_ttft = sum(self.req_prefill_ttft) / len(self.req_prefill_ttft) if len(self.req_prefill_ttft) > 0 else 0
-                logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}][Reqs {self.req_nums}]{self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
-                logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
-                logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
-                logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
-                logger.critical("==="*10)
+                # logger.critical(f"\033[94m TTFT \033[0m:  [Init {init_ttft:.4f}][Queue {queue_ttft:.4f}][Prefill {prefill_ttft:.4f}][Reqs {self.req_nums}]{self.req_init_ttft} ||| {self.req_queue_ttft} ||| {self.req_prefill_ttft}")
+                # logger.critical(f"\033[94m UPDATE \033[0m:  [{self.batch_per_timestep} batch][{self.batch_prefill - self.last_batch_prefill} / {self.batch_prefill} prefill][{self.batch_decode - self.last_batch_decode} / {self.batch_decode} decode]")
+                # logger.critical(f"\033[94m UPDATE \033[0m:  [{lasting_time:.4f}s][{recv_req.timestep_cnt} ts] Updated timestep data: {recv_req.timestep_data}, Updated agent data: {recv_req.agent_data} evict: {self.tree_cache.evictable_size()}")
+                # logger.critical(f"Memory stats: {self.token_to_kv_pool_allocator.get_memory_stats()}, page size: {self.token_to_kv_pool_allocator.page_size}")
+                # logger.critical("==="*10)
                 self.batch_per_timestep = 0
                 self.activate_agent = set()
                 self.last_update_time = time.time()
@@ -2968,7 +2968,7 @@ class Scheduler(
                 self.new_timestep = True
                 self.req_nums = 0
                 self.agent_call_time = 0
-                logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
+                # logger.critical("\033[95m   [BD] Timestep End, Stop to Count   \033[0m")
             except Exception as e:
                 logger.error(f"Failed to update agent timesteps: {e}")
         else:

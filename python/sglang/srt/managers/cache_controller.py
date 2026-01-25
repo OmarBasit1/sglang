@@ -609,7 +609,7 @@ class HiCacheController:
                     if is_interrupt == True:
                         if operation is not None:
                             interrupted_operation.append(operation)
-                            logger.warning(f"\033[93m[Interrupt]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                            # logger.warning(f"\033[93m[Interrupt]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
                         self._handle_outdated_operations(interrupted_operation)
                     if operation is None or is_interrupt == True:
                         continue
@@ -633,7 +633,7 @@ class HiCacheController:
                         is_interrupt = self._check_interrupt_signal(operation)
                         if is_interrupt:
                             interrupted_operation = [operation]
-                            logger.warning(f"\033[93m[Interrupt][layer_{layer_i}]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
+                            # logger.warning(f"\033[93m[Interrupt][layer_{layer_i}]   Interrupt operation {operation.id}, node {operation.node_id}, priority: {operation.priority}\033[0m")
                             self._handle_outdated_operations(interrupted_operation)
                             break
                         self.mem_pool_host.load_to_device_per_layer(
@@ -647,13 +647,13 @@ class HiCacheController:
                         self.layer_done_counter.increment()
 
                     t2 = time.perf_counter()
-                    logger.warning(f"[CC][is_interrupt = {is_interrupt}]    time = {t2 - t1}, node {operation.node_ids}, priority: {operation.priority}")
+                    # logger.warning(f"[CC][is_interrupt = {is_interrupt}]    time = {t2 - t1}, node {operation.node_ids}, priority: {operation.priority}")
                     if operation.priority == 0:
                         self.loading_time = 0
                     else:
                         if self.print_flag != operation.priority:
                             self.print_flag = operation.priority
-                            logger.warning(f"[CC][all]    Loading time for priority {operation.priority}: {self.loading_time}")
+                            # logger.warning(f"[CC][all]    Loading time for priority {operation.priority}: {self.loading_time}")
                             self.loading_time = 0
                         else:
                             self.loading_time += t2 - t1
@@ -668,7 +668,7 @@ class HiCacheController:
                             self.ack_load_queue.put(node_id)
 
                     self.load_kv_time += time.perf_counter() - t0
-                    logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
+                    # logger.warning(f"[CC]    Timestep load_kv_time: {self.load_kv_time - self.last_load_kv_time}")
                     
                 except Exception as e:
                     logger.error(f"Error during load operation: {e}")
@@ -1028,11 +1028,11 @@ class HiCacheController:
         for item in self.load_queue.queue:
             if op.node_ids[0] in item.node_ids:
                 if item.priority <= op.priority:
-                    logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with same priority. Ignore the followed not enough memory.\033[0m")
+                    # logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with same priority. Ignore the followed not enough memory.\033[0m")
                     return 1
                 else:
                     # self.load_queue.queue.remove(item)
-                    logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with lower priority. Ignore the followed not enough memory.\033[0m")
+                    # logger.critical(f"\033[95m [QueueCheck] Duplicated load request found: {op.node_ids[0]} with lower priority. Ignore the followed not enough memory.\033[0m")
                     return 2
         return 0
 

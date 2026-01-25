@@ -238,11 +238,11 @@ class HiRadixCache(RadixCache):
                             cur_node.loading = False
                             self._evict_backuped(cur_node)
                             cur_node = cur_node.parent
-                        logger.error(f"\033[91mNode {end_node.id} loading failed\033[0m")
+                        # logger.error(f"\033[91mNode {end_node.id} loading failed\033[0m")
 
                     del self.ongoing_load_back[node_id]
-                else:
-                    logger.error(f"\033[91m [Check][load]    Node {node_id} loading not in progress\033[0m")
+                # else:
+                    # logger.error(f"\033[91m [Check][load]    Node {node_id} loading not in progress\033[0m")
                     # raise ValueError("Node loading not in progress")
                 # ack_id = self.cache_controller.ack_load_queue.get_nowait()
                 # start_node, end_node = self.ongoing_load_back[ack_id]
@@ -291,7 +291,7 @@ class HiRadixCache(RadixCache):
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
                     # write to host if the node is not backuped
-                    logger.warning(f"\033[33m [Evict]  node: {x.id}\033[0m")
+                    # logger.warning(f"\033[33m [Evict]  node: {x.id}\033[0m")
                     num_evicted += self.write_backup(x, write_back=True)
                     write_back_nodes.append(x)
                 else:
@@ -309,9 +309,9 @@ class HiRadixCache(RadixCache):
                 # heapq.heappush(leaves, x.parent)
                 leaves.append(x.parent)
 
-        if len(leaves) == 0:
-            logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
-        logger.info(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
+        # if len(leaves) == 0:
+            # logger.warning("\033[33m [Evict][all] No more leaves to evict \033[0m")
+        # logger.info(f"\033[33m [Evict][all] evict len = {num_evicted} \033[0m")
 
         if self.cache_controller.write_policy == "write_back":
             self.writing_check(write_back=True)
@@ -384,7 +384,8 @@ class HiRadixCache(RadixCache):
                     node.backuped
                 ), "No backup available on evicted nodes, should not happen"
                 if stop == True:
-                    logger.error(f"\033[94m [Load back][bug]   node {node.id}, evicted {node.evicted}, loading {node.loading} \033[0m")
+                    pass
+                    # logger.error(f"\033[94m [Load back][bug]   node {node.id}, evicted {node.evicted}, loading {node.loading} \033[0m")
                 else:
                     nodes_to_load.insert(0, node)
             else:
@@ -400,7 +401,7 @@ class HiRadixCache(RadixCache):
 
 
         if len(nodes_to_load) == 0:
-            logger.warning(f"\033[94m [load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading} \033[0m")
+            # logger.warning(f"\033[94m [load][return]    no nodes to load back, node-id:{node.id}, node-evicted:{node.evicted}, node-loading:{node.loading} \033[0m")
             return None
         total_len = sum([len(n.key) for n in nodes_to_load])
         logger.info(f"\033[94m [Load][init] back priority={priority} total_len={total_len} \033[0m")
@@ -408,7 +409,7 @@ class HiRadixCache(RadixCache):
         if check_reserve:
             available_and_evictable = self.token_to_kv_pool_allocator.available_size() + self.evictable_size()
             if total_len > available_and_evictable:
-                logger.warning(f"\033[94m [load][back][denied]: start {nodes_to_load[0].id}, need {total_len}, available & evictable {available_and_evictable} \033[0m")
+                # logger.warning(f"\033[94m [load][back][denied]: start {nodes_to_load[0].id}, need {total_len}, available & evictable {available_and_evictable} \033[0m")
                 return None
 
         # protect the ancestor nodes from eviction
@@ -428,7 +429,7 @@ class HiRadixCache(RadixCache):
         )
         if device_indices is None:
             if len(host_indices) > self.token_to_kv_pool_allocator.available_size() + self.evictable_size():
-                logger.warning(f"\033[94m [load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()} \033[0m")
+                # logger.warning(f"\033[94m [load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()} \033[0m")
                 self.dec_lock_ref(ancester_node)
                 return None
             self.evict(len(host_indices))
@@ -462,7 +463,7 @@ class HiRadixCache(RadixCache):
     ):
         _ = host_hit_length  # unused, but kept for compatibility
         if last_node.evicted:
-            logger.critical(f"\033[94m Init Load back node {last_node.id} \033[0m")
+            # logger.critical(f"\033[94m Init Load back node {last_node.id} \033[0m")
             loading_values = self.load_back(last_node, mem_quota, priority)
             if loading_values is not None:
                 logger.debug(
@@ -940,7 +941,7 @@ class HiRadixCache(RadixCache):
         while stack:
             current_node, current_indent = stack.pop()
             if current_node.agents:
-                agents_str = '{' + ', '.join(f'({k}:{v.hit_cnt})' for k, v in current_node.agents.items()) + '}'
+                agents_str = '{' + ', '.join(f'({k}:{v})' for k, v in current_node.agents.items()) + '}'
             else:
                 agents_str = '{}'
             if current_node.evicted:

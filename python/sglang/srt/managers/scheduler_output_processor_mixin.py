@@ -91,13 +91,13 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
-                        prefill_tokens = len(req.origin_input_ids)
-                        decode_tokens = len(req.output_ids)
-                        if prefill_tokens > 0:
-                            ratio = decode_tokens / prefill_tokens
-                            logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
-                        else:
-                            logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
+                        # prefill_tokens = len(req.origin_input_ids)
+                        # decode_tokens = len(req.output_ids)
+                        # if prefill_tokens > 0:
+                        #     ratio = decode_tokens / prefill_tokens
+                            # logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
+                        # else:
+                            # logger.warning(f"\033[38;5;208m [Prefill] \033[0m [rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
                         self.tree_cache.cache_finished_req(req)
                         self.tree_cache._update_leaf_node_priority(req, req.last_node)
                         req.time_stats.completion_time = time.time()
@@ -277,13 +277,13 @@ class SchedulerOutputProcessorMixin:
 
             req.check_finished()
             if req.finished():
-                prefill_tokens = len(req.origin_input_ids)
-                decode_tokens = len(req.output_ids)
-                if prefill_tokens > 0:
-                    ratio = decode_tokens / prefill_tokens
-                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
-                else:
-                    logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
+                # prefill_tokens = len(req.origin_input_ids)
+                # decode_tokens = len(req.output_ids)
+                # if prefill_tokens > 0:
+                #     ratio = decode_tokens / prefill_tokens
+                    # logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: {ratio:.2f}")
+                # else:
+                    # logger.warning(f"\033[38;5;208m [Decode] \033[0m [aid={req.agent_id}][rid={req.rid}] Prefill tokens: {prefill_tokens}, Decode tokens: {decode_tokens}, Ratio: inf")
                 self.tree_cache.cache_finished_req(req)
                 self.tree_cache._update_leaf_node_priority(req, req.last_node)
                 if self.enable_lora:
@@ -773,41 +773,41 @@ class SchedulerOutputProcessorMixin:
         self.tree_cache.cache_controller._clear_outdated_operations(2)
         lr_pf_enabled = not self.server_args.disable_lr_pf
         if lr_pf_enabled:
-            print(
-                f"\033[95m[Prefetch] Updating LoRA priority before prefetching...\033[0m"
-            )
+            # print(
+            #     f"\033[95m[Prefetch] Updating LoRA priority before prefetching...\033[0m"
+            # )
             self.lora_manager.memory_pool.update_lora_priority()
-            print(f"\033[95m[Prefetch] LoRA priority updated.\033[0m")
-        else:
-            print(
-                "\033[95m[Prefetch] Skipping LoRA prefetch (no lora_manager or disabled).\033[0m"
-            )
+            # print(f"\033[95m[Prefetch] LoRA priority updated.\033[0m")
+        # else:
+            # print(
+            #     "\033[95m[Prefetch] Skipping LoRA prefetch (no lora_manager or disabled).\033[0m"
+            # )
         self.prefetch_agent = set()
         self.prefetch_lora = set()
         self.tree_cache.check_hicache_events()
-        print(f"\033[95m[Prefetch] Starting prefetch_agent_timestep...\033[0m")
+        # print(f"\033[95m[Prefetch] Starting prefetch_agent_timestep...\033[0m")
         if self.agent_manager.update_dict_timestep is None:
             logger.warning("\033[91m update_dict_timestep is None\033[0m")
             return
-        print(f"\033[95m[Prefetch] update_dict_timestep: {self.agent_manager.update_dict_timestep}\033[0m")
+        # print(f"\033[95m[Prefetch] update_dict_timestep: {self.agent_manager.update_dict_timestep}\033[0m")
         p_step = prefetch_step if prefetch_step is not None else self.agent_manager.prefetch_step
         lora_names = []
         lora_names.append("lora0")
         self.prefetch_lora.add("lora0")
-        print(f"\033[95m[Prefetch] Start prefetching up to step: {p_step}\033[0m")
+        # print(f"\033[95m[Prefetch] Start prefetching up to step: {p_step}\033[0m")
         try:
             for step in range(0, p_step+1):
-                print(f"\033[95m[Prefetch] step: {step}\033[0m")
+                # print(f"\033[95m[Prefetch] step: {step}\033[0m")
                 last_nodes = []
                 agent_ids = self.agent_manager.update_dict_timestep.get(step, [])
-                print(f"\033[95m[Prefetch] step: {step}, agent_ids: {agent_ids}\033[0m")
+                # print(f"\033[95m[Prefetch] step: {step}, agent_ids: {agent_ids}\033[0m")
                 # TODO: 1. add agent-up-bound-memory    2. strategy of prefetch within different agent priority
                 if agent_ids is None or len(agent_ids) == 0:
-                    logger.critical("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
+                    # logger.critical("\033[95m [Prefetch] step: %s, no agent_ids found\033[0m", step)
                     continue
                 for agent_id in agent_ids:
                     lora_names.append(f"lora{agent_id}")
-                logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
+                # logger.warning(f"[pf = {step}] agent_ids: {agent_ids}, lora_names: {lora_names}")
                 agent_prefetch_statistic = {}
 
                 for agent_id in agent_ids:

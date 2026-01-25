@@ -973,12 +973,12 @@ def configure_logger(server_args, prefix: str = ""):
         logging.config.dictConfig(custom_config)
         return
     format = f"[%(asctime)s{prefix}] %(levelname)s %(message)s"
-    log_dir = "logs"
-    log_filename = datetime.datetime.now().strftime("log_%Y%m%d_%H%M%S.log")
-    log_path = os.path.join(log_dir, log_filename)
+    # log_dir = "logs"
+    # log_filename = datetime.datetime.now().strftime("log_%Y%m%d_%H%M%S.log")
+    # log_path = os.path.join(log_dir, log_filename)
     # Write to both file and stdout
     handlers = [
-        logging.FileHandler(log_path, encoding="utf-8"),
+        # logging.FileHandler(log_path, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
     logging.basicConfig(
