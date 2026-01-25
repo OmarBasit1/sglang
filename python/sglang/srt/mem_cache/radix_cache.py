@@ -218,6 +218,8 @@ class RadixCache(BasePrefixCache):
         self.root_node.key = []
         self.root_node.value = []
         self.root_node.host_value = []
+        if self.agent_manager is not None:
+            self.agent_manager.reset_cache_state()
         self.root_node.lock_ref = 1
         self.evictable_size_ = 0
         self.protected_size_ = 0
@@ -633,6 +635,8 @@ class RadixCache(BasePrefixCache):
 
     def _update_agent_to_last_nodes(self, req: Req, last_node: TreeNode):
         agent_id = req.agent_id
+        if agent_id is None:
+            return
         
         if agent_id not in self.agent_manager.agent_to_last_nodes:
             self.agent_manager.agent_to_last_nodes[agent_id] = set()
@@ -660,6 +664,8 @@ class RadixCache(BasePrefixCache):
 
     def _update_leaf_node_priority(self, req: Req, last_node: TreeNode):
         agent_id = req.agent_id
+        if agent_id is None:
+            return
         self._update_agent_to_last_nodes(req, last_node)
         n = last_node
         if agent_id not in n.agents:

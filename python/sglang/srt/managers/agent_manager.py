@@ -12,13 +12,18 @@ class AgentManager:
         self.hold_step = hold_step
         self.prefetch_step = prefetch_step
         self.agent_to_last_nodes: Dict[str, Set[Any]] = defaultdict(set)
-        self.agent_last_node_id: int = None
+        self.agent_last_node_id: Optional[int] = None
         self.update_dict_agent = dict[str, Any]()
         self.update_dict_timestep = dict[int, List[str]]()
         self.update_version: int = 0
         # self.agent_hold_priority = defaultdict(int)
         # self.agent_prefetch_priority = defaultdict(float)
         self.lock = threading.RLock()
+
+    def reset_cache_state(self) -> None:
+        with self.lock:
+            self.agent_to_last_nodes.clear()
+            self.agent_last_node_id = None
 
     def update_agent_timestep(self, update_dict_agent: dict[str, Any], update_dict_timestep: dict[int, List[str]]):
         with self.lock:
@@ -34,9 +39,9 @@ class AgentManager:
         if self.update_dict_timestep is None or len(self.update_dict_timestep) == 0:
             logger.warning("\033[91mupdate_dict_timestep is None or empty\033[0m")
 
-    def get_agent_hold_priority(self, agent_id: str) -> int:
+    def get_agent_hold_priority(self, agent_id: Optional[str]) -> int:
         if agent_id is None:
-            raise ValueError("agent_id cannot be None")
+            return self.hold_step + 2
         if agent_id == '-1':
             logger.error(f"\033[91m hold agent_id: {agent_id} is invalid!!! \033[0m")
             return self.hold_step + 2
@@ -48,7 +53,7 @@ class AgentManager:
             return self.hold_step + 2
         return min(self.hold_step + 1, self.update_dict_agent[agent_id])
 
-    def get_agents_hold_priority(self, agents: list[str]):
+    def get_agents_hold_priority(self, agents: list[Optional[str]]):
         max_priority = self.hold_step + 2
         max_agent_id = None
         for agent_id in agents:
@@ -70,13 +75,17 @@ class AgentManager:
         node.hold_priority = priority
         return agent_id, priority
 
-    def get_agent_prefetch_priority(self, agent_id: str) -> int:
+    def get_agent_prefetch_priority(self, agent_id: Optional[str]) -> int:
+        if agent_id is None:
+            return self.prefetch_step + 2
+        if agent_id not in self.update_dict_agent:
+            return self.prefetch_step + 2
         if self.update_dict_agent[agent_id] is None:
             logger.error(f"\033[91m prefetch agent_id: {agent_id} 's value is invalid!!! \033[0m")
             return self.prefetch_step + 2
         return min(self.prefetch_step + 1, self.update_dict_agent[agent_id])
 
-    def get_agents_prefetch_priority(self, agents: list[str]):
+    def get_agents_prefetch_priority(self, agents: list[Optional[str]]):
         max_priority = self.prefetch_step + 2
         max_agent_id = None
         for agent_id in agents:

@@ -26,6 +26,11 @@ class OpenAIServingBase(ABC):
     ) -> Union[Any, StreamingResponse, ErrorResponse]:
         """Handle the specific request type with common pattern"""
         try:
+            # Set agent_id from header if exists
+            header_agent_id = raw_request.headers.get("x-sglang-agent-id")
+            if header_agent_id:
+                request = request.model_copy(update={"agent_id": header_agent_id})
+
             # Validate request
             error_msg = self._validate_request(request)
             if error_msg:
