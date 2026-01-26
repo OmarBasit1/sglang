@@ -390,6 +390,7 @@ class ServerArgs:
     disable_prefetch: bool = False
     disable_lr_pf: bool = False
     disable_kv_pf: bool = False
+    kv_pf_reserve_tokens: int | None = None
 
 
     def __post_init__(self):
@@ -2155,6 +2156,12 @@ class ServerArgs:
             "--disable-kv-pf",
             action="store_true",
             help="Disable prefetching kv",
+        )
+        parser.add_argument(
+            "--kv-pf-reserve-tokens",
+            type=int,
+            default=ServerArgs.kv_pf_reserve_tokens,
+            help="Minimum free KV tokens to keep available for prefill; KV prefetch/load-back is skipped when below this threshold.",
         )
 
 

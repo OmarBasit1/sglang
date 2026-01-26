@@ -824,6 +824,7 @@ class SchedulerOutputProcessorMixin:
                             
 
                     if self.server_args.disable_kv_pf is not True:
+                        kv_pf_reserve_tokens = self.server_args.kv_pf_reserve_tokens
                         last_nodes = self.agent_manager.agent_to_last_nodes.get(agent_id, [])
                         # 确保 last_nodes 不为 None
                         if last_nodes is None or len(last_nodes) == 0:
@@ -843,6 +844,11 @@ class SchedulerOutputProcessorMixin:
                         for node in last_nodes:
                             n = node
                             if n.evicted and not n.loading:
+                                if kv_pf_reserve_tokens and kv_pf_reserve_tokens > 0:
+                                    available_tokens = self.token_to_kv_pool_allocator.available_size()
+                                    if available_tokens < kv_pf_reserve_tokens:
+                                        to_break = True
+                                        break
                                 dv_indices = self.tree_cache.load_back(n, priority=step+1, check_reserve=True)
                                 if dv_indices is None:
                                     to_break = True
