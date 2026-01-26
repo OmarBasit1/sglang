@@ -306,6 +306,15 @@ class RadixCache(BasePrefixCache):
         # Remove req slot release the cache lock
         self.req_to_token_pool.free(req.req_pool_idx)
         self.dec_lock_ref(req.last_node)
+        # If hierarchical cache is eabled, the scheduler may call
+        # `last_host_node.protect_host()` to keep host-backed nodes alive while
+        # the request is running. Release it here when the request is done.
+        try:
+            last_host_node = req.last_host_node
+            if last_host_node is not None and last_host_node is not self.root_node:
+                last_host_node.release_host()
+        except Exception:
+            pass
 
     def cache_unfinished_req(self, req: Req, chunked=False):
         """Cache request when it is unfinished."""

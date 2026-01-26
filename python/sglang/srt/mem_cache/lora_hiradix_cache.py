@@ -229,6 +229,10 @@ class LoRAHiRadixCache(LoRARadixCache):
                         while cur_node != start_node:
                             assert cur_node.loading
                             cur_node.loading = False
+                            try:
+                                cur_node.release_host()
+                            except Exception:
+                                pass
                             cur_node = cur_node.parent
                         self.dec_lock_ref(end_node)
                         logger.info(f"Node {end_node.id} loading successfully")
@@ -238,6 +242,10 @@ class LoRAHiRadixCache(LoRARadixCache):
                             assert cur_node.loading
                             cur_node.loading = False
                             self._evict_backuped(cur_node)
+                            try:
+                                cur_node.release_host()
+                            except Exception:
+                                pass
                             cur_node = cur_node.parent
                         # logger.error(f"\033[91mNode {end_node.id} loading failed\033[0m")
 
@@ -378,6 +386,20 @@ class LoRAHiRadixCache(LoRARadixCache):
         stop = False
         ancester_node = None
 
+        def _protect_host_nodes() -> None:
+            for n in nodes_to_load:
+                try:
+                    n.protect_host()
+                except Exception:
+                    pass
+
+        def _release_host_nodes() -> None:
+            for n in nodes_to_load:
+                try:
+                    n.release_host()
+                except Exception:
+                    pass
+
         while node != self.root_node:
             if node.evicted:
                 assert (
@@ -423,6 +445,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             self.dec_lock_ref(ancester_node)
             return None
 
+        _protect_host_nodes()
         device_indices = self.cache_controller.load(
             host_indices=host_indices, node_id=last_hit_node.id, priority=priority
         )
@@ -430,6 +453,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             if len(host_indices) > self.token_to_kv_pool_allocator.available_size() + self.evictable_size():
                 # logger.warning(f"\033[94m [load][back][denied][2]: need {len(host_indices)}, available & evictable {self.token_to_kv_pool_allocator.available_size() + self.evictable_size()} \033[0m")
                 self.dec_lock_ref(ancester_node)
+                _release_host_nodes()
                 return None
             self.evict(len(host_indices))
             device_indices = self.cache_controller.load(
@@ -438,6 +462,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         self.dec_lock_ref(ancester_node)
         if device_indices is None:
             # no sufficient GPU memory to load back KV caches
+            _release_host_nodes()
             return None
 
         nodes_to_load[0].hold_priority = priority if priority is not None else 0

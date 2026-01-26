@@ -767,11 +767,20 @@ class Req:
                     return
 
     def reset_for_retract(self):
+        # Release host-node protection if it was set by the scheduler.
+        try:
+            if self.last_host_node is not None:
+                self.last_host_node.release_host()
+        except Exception:
+            pass
         self.prefix_indices = []
         self.last_node = None
+        self.last_host_node = None
+        self.host_hit_length = 0
         self.swa_uuid_for_lock = None
         self.extend_input_len = 0
         self.is_retracted = True
+        self.is_fetched = False
         self.input_token_logprobs = None
         self.temp_input_top_logprobs_val = None
         self.temp_input_top_logprobs_idx = None

@@ -1868,6 +1868,19 @@ class Scheduler(
                         ) = self.tree_cache.match_prefix(
                             key=req.adjust_max_prefix_ids()
                         )
+                    # Protect the matched host node from host eviction while the
+                    # request is alive. Otherwise, `evict_host()` can prune a host
+                    # node still referenced by `req.last_host_node`, causing
+                    # load-back to operate on a detached node and "lose" KV indices.
+                    try:
+                        if (
+                            req.last_host_node is not None
+                            and getattr(self.tree_cache, "root_node", None)
+                            is not req.last_host_node
+                        ):
+                            req.last_host_node.protect_host()
+                    except Exception:
+                        pass
                     self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
                     req.is_fetched = True
             prefix_computed = True
@@ -2712,6 +2725,16 @@ class Scheduler(
             if self.enable_hicache_storage:
                 # to release prefetch events associated with the request
                 self.tree_cache.release_aborted_request(req.rid)
+            # Release any host-node protection added during prefix matching.
+            try:
+                if (
+                    req.last_host_node is not None
+                    and getattr(self.tree_cache, "root_node", None)
+                    is not req.last_host_node
+                ):
+                    req.last_host_node.release_host()
+            except Exception:
+                pass
             self.send_to_tokenizer.send_pyobj(AbortReq(req.rid))
             # For disaggregation decode mode, the request in the waiting queue has KV cache allocated.
             if self.disaggregation_mode == DisaggregationMode.DECODE:
