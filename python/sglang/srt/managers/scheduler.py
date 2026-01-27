@@ -717,6 +717,7 @@ class Scheduler(
                         model_name=server_args.served_model_name,
                         storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
                         agent_manager=self.agent_manager,
+                        kv_pf_reserve_tokens=server_args.kv_pf_reserve_tokens,
                     )
                 else:
                     self.tree_cache = HiRadixCache(
@@ -738,6 +739,7 @@ class Scheduler(
                         model_name=server_args.served_model_name,
                         storage_backend_extra_config=server_args.hicache_storage_backend_extra_config,
                         agent_manager=self.agent_manager,
+                        kv_pf_reserve_tokens=server_args.kv_pf_reserve_tokens,
                     )
                 self.tp_worker.register_hicache_layer_transfer_counter(
                     self.tree_cache.cache_controller.layer_done_counter

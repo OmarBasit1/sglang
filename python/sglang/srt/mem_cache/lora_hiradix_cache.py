@@ -49,6 +49,7 @@ class LoRAHiRadixCache(LoRARadixCache):
         model_name: Optional[str] = None,
         storage_backend_extra_config: Optional[str] = None,
         agent_manager: Optional[AgentManager] = None,
+        kv_pf_reserve_tokens: Optional[int] = None,
     ):
 
         if hicache_io_backend == "direct":
@@ -115,6 +116,7 @@ class LoRAHiRadixCache(LoRARadixCache):
             1 if hicache_write_policy == "write_through" else 2
         )
         self.load_back_threshold = 0   # TODO change to 0
+        self.kv_pf_reserve_tokens = kv_pf_reserve_tokens
         super().__init__(
             req_to_token_pool, token_to_kv_pool_allocator, page_size, disable=False, agent_manager=self.agent_manager
         )
@@ -429,7 +431,8 @@ class LoRAHiRadixCache(LoRARadixCache):
 
         if check_reserve:
             available_and_evictable = self.token_to_kv_pool_allocator.available_size() + self.evictable_size()
-            if total_len > available_and_evictable:
+            reserved = self.kv_pf_reserve_tokens or 0
+            if total_len > available_and_evictable - reserved:
                 # logger.warning(f"\033[94m [load][back][denied]: start {nodes_to_load[0].id}, need {total_len}, available & evictable {available_and_evictable} \033[0m")
                 return None
 
