@@ -1840,9 +1840,36 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     swa_num_tokens = max(0, num_tokens - swa_available_size)
                     self.tree_cache.evict(full_num_tokens, swa_num_tokens)
         else:
-            if self.token_to_kv_pool_allocator.available_size() < num_tokens:
-                if self.tree_cache is not None:
-                    self.tree_cache.evict(num_tokens)
+            if self.tree_cache is None:
+                return
+
+            while self.token_to_kv_pool_allocator.available_size() < num_tokens:
+                before = self.token_to_kv_pool_allocator.available_size()
+                to_evict = num_tokens - before
+
+                # HiRadixCache has holding policies that can block eviction even under
+                # memory pressure. If present, bypass holding by evicting with
+                # `ignore_holding=True`.
+                evicted = None
+                evict_helper = getattr(self.tree_cache, "_evict_helper", None)
+                if evict_helper is not None:
+                    try:
+                        evicted = evict_helper(to_evict, ignore_holding=True, steps=1)
+                    except TypeError:
+                        # Fallback for signature mismatch across versions.
+                        evicted = evict_helper(to_evict)
+                else:
+                    self.tree_cache.evict(to_evict)
+
+                # Merge released pages so `alloc()` can see them when sorting is enabled.
+                try:
+                    self.token_to_kv_pool_allocator.merge_and_sort_free()
+                except Exception:
+                    pass
+
+                after = self.token_to_kv_pool_allocator.available_size()
+                if (evicted is not None and evicted <= 0) or after <= before:
+                    break
 
     def _is_available_size_sufficient(self, num_tokens: int) -> bool:
         if self.is_hybrid:
