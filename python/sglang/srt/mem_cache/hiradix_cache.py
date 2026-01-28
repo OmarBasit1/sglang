@@ -294,9 +294,10 @@ class HiRadixCache(RadixCache):
                 continue
 
             if ignore_holding is False:
-                _, priority = self.agent_manager.get_node_hold_priority(x)
-                if priority < steps:
-                    continue
+                if self.agent_manager is not None:
+                    _, priority = self.agent_manager.get_node_hold_priority(x)
+                    if priority < steps:
+                        continue
 
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
@@ -338,7 +339,10 @@ class HiRadixCache(RadixCache):
         num_evicted = self.cache_controller.evict_device(node.value, node.host_value)
         node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         assert num_evicted > 0
-        self.evictable_size_ -= num_evicted
+        if node.lock_ref > 0:
+            self.protected_size_ -= num_evicted
+        else:
+            self.evictable_size_ -= num_evicted
         node.value = None
         return num_evicted
 
@@ -842,7 +846,10 @@ class HiRadixCache(RadixCache):
                     # this often happens in the case of KV cache recomputation
                     node.value = value[:prefix_len]
                     self.token_to_kv_pool_host.update_synced(node.host_value)
-                    self.evictable_size_ += len(node.value)
+                    if node.lock_ref > 0:
+                        self.protected_size_ += len(node.value)
+                    else:
+                        self.evictable_size_ += len(node.value)
                 else:
                     self._inc_hit_count(node, chunked)
                     total_prefix_length += prefix_len
@@ -852,7 +859,10 @@ class HiRadixCache(RadixCache):
                 if new_node.evicted:
                     new_node.value = value[:prefix_len]
                     self.token_to_kv_pool_host.update_synced(new_node.host_value)
-                    self.evictable_size_ += len(new_node.value)
+                    if new_node.lock_ref > 0:
+                        self.protected_size_ += len(new_node.value)
+                    else:
+                        self.evictable_size_ += len(new_node.value)
                 else:
                     self._inc_hit_count(new_node, chunked)
                     total_prefix_length += prefix_len
@@ -948,6 +958,8 @@ class HiRadixCache(RadixCache):
         return self.REQ_IS_READY
 
     def _update_leaf_node_timestep(self):
+        if self.agent_manager is None:
+            return
         leaves = self._collect_leaves()
         logger.debug(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
         update_dict = self.agent_manager.get_update_dict_agent()

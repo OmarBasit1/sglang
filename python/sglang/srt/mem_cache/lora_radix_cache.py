@@ -499,19 +499,30 @@ class LoRARadixCache(BasePrefixCache):
                     child.key
                 ), f"{key=}, {self.get_child_key_fn(child.key)=}"
                 
-    def _delete_leaf(self, node):
+    def _delete_leaf(self, node: LoRATreeNode):
         for k, v in node.parent.children.items():
             if v == node:
                 break
-        del node.parent.children[k]
-        self.evictable_size_ -= len(node.key)
+        del node.parent.children[k]  # type: ignore
+
+        # Accounting: remove this node's tokens from the correct bucket.
+        # NOTE: use `value` length (KV indices), not `key` length (token ids).
+        n = len(node.value) if node.value is not None else 0
+        if n <= 0:
+            return
+
+        if node.lock_ref > 0:
+            self.protected_size_ -= n
+        else:
+            self.evictable_size_ -= n
 
     def _total_size_helper(self):
         total_size = 0
         stack = [self.root_node]
         while stack:
             current_node = stack.pop()
-            total_size += len(current_node.value)
+            if current_node.value is not None:
+                total_size += len(current_node.value)
             for child in current_node.children.values():
                 if child.evicted:
                     continue
@@ -589,7 +600,11 @@ class LoRARadixCache(BasePrefixCache):
         return events
 
     def _update_agent_to_last_nodes(self, req: Req, last_node: LoRATreeNode):
+        if self.agent_manager is None:
+            return
         agent_id = req.agent_id
+        if agent_id is None:
+            return
         
         if agent_id not in self.agent_manager.agent_to_last_nodes:
             self.agent_manager.agent_to_last_nodes[agent_id] = set()
@@ -616,7 +631,11 @@ class LoRARadixCache(BasePrefixCache):
             current_last_nodes.add(last_node)
 
     def _update_leaf_node_priority(self, req: Req, last_node: LoRATreeNode):
+        if self.agent_manager is None:
+            return
         agent_id = req.agent_id
+        if agent_id is None:
+            return
         self._update_agent_to_last_nodes(req, last_node)
         n = last_node
         if agent_id not in n.agents:
@@ -639,6 +658,8 @@ class LoRARadixCache(BasePrefixCache):
         # n.agents[agent_id].update_priority()
 
     def _update_leaf_node_timestep(self):
+        if self.agent_manager is None:
+            return
         leaves = self._collect_leaves()
         logger.debug(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
         update_dict = self.agent_manager.get_update_dict_agent()

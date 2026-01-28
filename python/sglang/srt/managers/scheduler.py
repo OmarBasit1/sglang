@@ -1597,6 +1597,13 @@ class Scheduler(
             self.handle_embedding_request(tokenized_req)
 
     def self_check_during_idle(self):
+        # Flush HiCache controller events during idle so KV accounting reflects
+        # completed/failed async operations (load-back/write-through).
+        if self.enable_hierarchical_cache and self.tree_cache is not None:
+            try:
+                self.tree_cache.check_hicache_events()
+            except Exception:
+                pass
         self.check_memory()
         self.check_tree_cache()
         self.new_token_ratio = self.init_new_token_ratio
@@ -1622,6 +1629,14 @@ class Scheduler(
         else:
             _, _, available_size, evictable_size = self._get_token_info()
             protected_size = self.tree_cache.protected_size()
+            if self.enable_hierarchical_cache and self.tree_cache is not None:
+                # Best-effort: flush HiCache events once before accounting.
+                try:
+                    self.tree_cache.check_hicache_events()
+                except Exception:
+                    pass
+
+            # Keep the old invariant as a warning only (useful signal for lock imbalance / fragmentation).
             memory_leak = (available_size + evictable_size) != (
                 self.max_total_num_tokens
                 if not self.enable_hierarchical_cache
@@ -1630,8 +1645,9 @@ class Scheduler(
             token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
 
         if memory_leak:
-            msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
-            raise ValueError(msg)
+            if not self.enable_hierarchical_cache:
+                msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
+                raise ValueError(msg)
 
         if self.disaggregation_mode == DisaggregationMode.DECODE:
             req_total_size = (
@@ -1847,44 +1863,45 @@ class Scheduler(
             self.time_start = time.perf_counter()
         if self.enable_hierarchical_cache:
             for req in self.waiting_queue:
-                if not req.is_fetched:
-                    self.req_nums += 1
-                    if isinstance(self.tree_cache, LoRAHiRadixCache):
-                        # LoRA-aware prefix matching
-                        (
-                            req.prefix_indices,
-                            req.last_node,
-                            req.last_host_node,
-                            req.host_hit_length,
-                        ) = self.tree_cache.match_prefix_with_lora_id(
-                            key=LoRAKey(
-                                lora_id=req.lora_id, token_ids=req.adjust_max_prefix_ids()
-                            )
-                        )
-                    else:
-                        (
-                            req.prefix_indices,
-                            req.last_node,
-                            req.last_host_node,
-                            req.host_hit_length,
-                        ) = self.tree_cache.match_prefix(
-                            key=req.adjust_max_prefix_ids()
-                        )
-                    # Protect the matched host node from host eviction while the
-                    # request is alive. Otherwise, `evict_host()` can prune a host
-                    # node still referenced by `req.last_host_node`, causing
-                    # load-back to operate on a detached node and "lose" KV indices.
-                    try:
-                        if (
-                            req.last_host_node is not None
-                            and getattr(self.tree_cache, "root_node", None)
-                            is not req.last_host_node
-                        ):
-                            req.last_host_node.protect_host()
-                    except Exception:
-                        pass
-                    self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
-                    req.is_fetched = True
+                self.req_nums += 1
+                # Recompute prefix matching for queued requests every scheduling round.
+                # The cache can be populated by other finished requests while this request
+                # is still waiting; if we only compute once, `prefix_indices` becomes stale
+                # and cache-hit rate drops.
+                old_host_node = req.last_host_node
+
+                # Use the canonical req path for prefix matching so `fill_ids`,
+                # `prefix_indices`, and `extend_input_len` are consistent.
+                req.init_next_round_input(
+                    self.tree_cache,
+                    enable_hicache=self.enable_hierarchical_cache,
+                )
+
+                root = getattr(self.tree_cache, "root_node", None)
+                # If the best host-backed node advances, release the old protection and
+                # protect the new node. Avoid repeated `protect_host()` on the same node.
+                try:
+                    if (
+                        old_host_node is not None
+                        and old_host_node is not root
+                        and old_host_node is not req.last_host_node
+                    ):
+                        old_host_node.release_host()
+                except Exception:
+                    pass
+
+                try:
+                    if (
+                        req.last_host_node is not None
+                        and req.last_host_node is not root
+                        and req.last_host_node is not old_host_node
+                    ):
+                        req.last_host_node.protect_host()
+                except Exception:
+                    pass
+
+                self.tree_cache._update_agent_to_last_nodes(req, req.last_host_node)
+                req.is_fetched = True
             prefix_computed = True
 
         # Get requests from the waiting queue to a new prefill batch

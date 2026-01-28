@@ -295,9 +295,10 @@ class LoRAHiRadixCache(LoRARadixCache):
                 continue
 
             if ignore_holding is False:
-                _, priority = self.agent_manager.get_node_hold_priority(x)
-                if priority < steps:
-                    continue
+                if self.agent_manager is not None:
+                    _, priority = self.agent_manager.get_node_hold_priority(x)
+                    if priority < steps:
+                        continue
 
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
@@ -338,7 +339,10 @@ class LoRAHiRadixCache(LoRARadixCache):
         num_evicted = self.cache_controller.evict_device(node.value, node.host_value)
         node.parent.hold_priority = max(node.parent.hold_priority, node.hold_priority)
         assert num_evicted > 0
-        self.evictable_size_ -= num_evicted
+        if node.lock_ref > 0:
+            self.protected_size_ -= num_evicted
+        else:
+            self.evictable_size_ -= num_evicted
         node.value = None
         return num_evicted
 
@@ -657,9 +661,13 @@ class LoRAHiRadixCache(LoRARadixCache):
         return True
 
     def match_prefix(self, key: List[int], **kwargs):
-        raise ValueError(
-            "LoRARadixCache needs both token ids and lora id as inputs for matching. Please use match_prefix_with_lora_id instead."
-        )
+        lora_id = kwargs.pop("lora_id", None)
+        if lora_id is None:
+            raise ValueError(
+                "LoRAHiRadixCache.match_prefix requires `lora_id`. "
+                "Use match_prefix_with_lora_id(...) or pass lora_id=... ."
+            )
+        return self.match_prefix_with_lora_id(LoRAKey(lora_id=lora_id, token_ids=key), **kwargs)
     
     def match_prefix_with_lora_id(self, key: LoRAKey, **kwargs) -> MatchResult: # TODO: matchresult necessary?
         empty_value = torch.empty((0,), dtype=torch.int64, device=self.device)
@@ -849,7 +857,10 @@ class LoRAHiRadixCache(LoRARadixCache):
                     # this often happens in the case of KV cache recomputation
                     node.value = value[:prefix_len]
                     self.token_to_kv_pool_host.update_synced(node.host_value)
-                    self.evictable_size_ += len(node.value)
+                    if node.lock_ref > 0:
+                        self.protected_size_ += len(node.value)
+                    else:
+                        self.evictable_size_ += len(node.value)
                 else:
                     self._inc_hit_count(node, chunked)
                     total_prefix_length += prefix_len
@@ -859,7 +870,10 @@ class LoRAHiRadixCache(LoRARadixCache):
                 if new_node.evicted:
                     new_node.value = value[:prefix_len]
                     self.token_to_kv_pool_host.update_synced(new_node.host_value)
-                    self.evictable_size_ += len(new_node.value)
+                    if new_node.lock_ref > 0:
+                        self.protected_size_ += len(new_node.value)
+                    else:
+                        self.evictable_size_ += len(new_node.value)
                 else:
                     self._inc_hit_count(new_node, chunked)
                     total_prefix_length += prefix_len
@@ -956,6 +970,8 @@ class LoRAHiRadixCache(LoRARadixCache):
         return self.REQ_IS_READY
 
     def _update_leaf_node_timestep(self):
+        if self.agent_manager is None:
+            return
         leaves = self._collect_leaves()
         logger.debug(f"[leaves][before] {[(leaf.id, leaf.hold_priority) for leaf in leaves]}")
         update_dict = self.agent_manager.get_update_dict_agent()
