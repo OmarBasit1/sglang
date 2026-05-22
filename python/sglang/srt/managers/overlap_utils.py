@@ -85,17 +85,47 @@ class AsyncCpuInt:
     def __index__(self):
         return self._resolve()
 
-    def __add__(self, other):
-        return self._resolve() + other
+    def __add__(self, o):
+        return self._resolve() + o
 
-    def __radd__(self, other):
-        return other + self._resolve()
+    def __radd__(self, o):
+        return o + self._resolve()
 
-    def __eq__(self, other):
-        return self._resolve() == other
+    def __sub__(self, o):
+        return self._resolve() - o
+
+    def __rsub__(self, o):
+        return o - self._resolve()
+
+    def __mul__(self, o):
+        return self._resolve() * o
+
+    def __rmul__(self, o):
+        return o * self._resolve()
+
+    def __eq__(self, o):
+        return self._resolve() == o
+
+    def __ne__(self, o):
+        return self._resolve() != o
+
+    def __lt__(self, o):
+        return self._resolve() < o
+
+    def __le__(self, o):
+        return self._resolve() <= o
+
+    def __gt__(self, o):
+        return self._resolve() > o
+
+    def __ge__(self, o):
+        return self._resolve() >= o
 
     def __hash__(self):
         return hash(self._resolve())
+
+    def __repr__(self):
+        return repr(self._resolve())
 
 
 _is_cuda = is_cuda()
