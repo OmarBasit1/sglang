@@ -16,14 +16,8 @@ if TYPE_CHECKING:
 
 
 class AsyncCpuTensor:
-    """Lazy CPU tensor backed by an in-flight pinned D2H. Any read auto-syncs
-    on the event the first time, then caches. Rationale: a non-consumer
-    never touches the attribute, so the sync only fires for callers who
-    actually need the value.
-
-    `__getattr__` covers tensor methods (`.sum`, `.tolist`, `.shape`, ...);
-    `__getitem__` / `__add__` are dunders Python doesn't route via
-    `__getattr__` and that spec_v2 code paths actually use."""
+    """Lazy CPU tensor over an in-flight pinned D2H — first read syncs on the
+    event and caches. Non-consumers never hit the sync."""
 
     __slots__ = ("_pinned_view", "_event", "_resolved")
 
@@ -121,9 +115,7 @@ class FutureMap:
         )
         if self.spec_algo.is_some():
             self._forward_buf_initialized = False
-            # Pinned dest for async D2H of new_seq_lens. Reused across iters;
-            # AsyncCpuTensor._resolve() clones off before the next iter
-            # overwrites the live slice.
+            # Pinned dest for async D2H, reused across iters (wrapper clones).
             self._seq_lens_cpu_pinned = torch.empty(
                 (self.req_pool_size,), dtype=torch.int64, pin_memory=True
             )
@@ -194,10 +186,8 @@ class FutureMap:
         batch.input_ids = -future_indices
 
     def resolve_seq_lens_cpu(self, batch: ScheduleBatch) -> None:
-        # spec_v2 pull of verify-resolved seq_lens. GPU-only fence on
-        # publish_ready + non_blocking D2H to pinned buf — CPU does not block
-        # here. batch.seq_lens_cpu becomes an AsyncCpuTensor; the first reader
-        # transparently syncs via the wrapper.
+        # spec_v2 pull of verify-resolved seq_lens. GPU-only fence +
+        # non_blocking D2H; consumer's first read syncs via the wrapper.
         fi = batch.spec_info.future_indices if batch.spec_info is not None else None
         if fi is None:
             return
@@ -213,7 +203,7 @@ class FutureMap:
         evt = device_module.Event()
         evt.record(stream)
         batch.seq_lens_cpu = AsyncCpuTensor(pinned_view, evt)
-        batch.seq_lens_sum = None  # forced re-compute via wrapper on demand
+        batch.seq_lens_sum = None
 
     def publish(self, future_indices: torch.Tensor, new_seq_lens: torch.Tensor) -> None:
         indices = future_indices
