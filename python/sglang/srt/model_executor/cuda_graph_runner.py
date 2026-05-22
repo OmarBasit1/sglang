@@ -365,7 +365,10 @@ class DecodeInputBuffers(ForwardInputBuffers):
         _grouped_foreach_copy_(dsts, srcs)
 
         # CPU tensor copy (cannot be batched with GPU tensors).
-        if forward_batch.seq_lens_cpu is not None:
+        if (
+            forward_batch.seq_lens_cpu is not None
+            and self.attn_backend.needs_cpu_seq_lens
+        ):
             if bs != raw_bs:
                 self.seq_lens_cpu.fill_(seq_len_fill_value)
             self.seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu)
@@ -1221,15 +1224,23 @@ class CudaGraphRunner:
         # FIXME: implicit channel for backends (dsv4) that need forward_batch
         # in replay metadata prep. Should become a real param on the interface.
         attn_backend._replay_forward_batch = forward_batch
+        if attn_backend.needs_cpu_seq_lens:
+            seq_lens_sum_arg = (
+                forward_batch.seq_lens_sum + (bs - raw_bs) * self.seq_len_fill_value
+            )
+            seq_lens_cpu_arg = buffers.seq_lens_cpu[:bs]
+        else:
+            seq_lens_sum_arg = None
+            seq_lens_cpu_arg = None
         attn_backend.init_forward_metadata_replay_cuda_graph(
             bs,
             buffers.req_pool_indices[:bs],
             buffers.seq_lens[:bs],
-            forward_batch.seq_lens_sum + (bs - raw_bs) * self.seq_len_fill_value,
+            seq_lens_sum_arg,
             buffers.encoder_lens[:bs] if self.is_encoder_decoder else None,
             self.capture_forward_mode,
             forward_batch.spec_info,
-            seq_lens_cpu=buffers.seq_lens_cpu[:bs],
+            seq_lens_cpu=seq_lens_cpu_arg,
         )
         attn_backend._replay_forward_batch = None
 

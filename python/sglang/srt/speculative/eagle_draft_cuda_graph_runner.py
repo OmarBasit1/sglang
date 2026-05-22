@@ -461,7 +461,10 @@ class EAGLEDraftCudaGraphRunner:
             forward_batch.req_pool_indices = buffers.req_pool_indices[:bs]
             forward_batch.positions = buffers.positions[:num_tokens]
 
-        if forward_batch.seq_lens_cpu is not None:
+        if (
+            forward_batch.seq_lens_cpu is not None
+            and self.draft_attn_backend.needs_cpu_seq_lens
+        ):
             if bs != raw_bs:
                 buffers.seq_lens_cpu.fill_(self.seq_len_fill_value)
             buffers.seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu)

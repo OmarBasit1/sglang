@@ -76,6 +76,8 @@ class ForwardMetadata:
 
 
 class TritonAttnBackend(AttentionBackend):
+    needs_cpu_seq_lens = False  # replay uses pre-allocated cuda_graph_kv_indices
+
     def __init__(
         self,
         model_runner: ModelRunner,
@@ -1246,6 +1248,8 @@ class TritonMultiStepDraftBackend:
     Wrap multiple triton attention backends as one for multiple consecutive
     draft decoding steps.
     """
+
+    needs_cpu_seq_lens = False
 
     def __init__(
         self,

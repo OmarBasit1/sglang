@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 class AttentionBackend(ABC):
     """The base class of attention backends"""
 
+    # If False, cuda graph runners skip the per-iter seq_lens_cpu / sum
+    # plumbing — backend opts out when its replay path doesn't read them.
+    needs_cpu_seq_lens: bool = True
+
     @abstractmethod
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
