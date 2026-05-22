@@ -41,6 +41,13 @@ class AsyncCpuTensor:
     def __add__(self, other):
         return self._resolve() + other
 
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        # Wrapper passed into a torch op (e.g. `tensor.copy_(wrapper)`):
+        # resolve every wrapper arg, then forward.
+        args = tuple(a._resolve() if isinstance(a, cls) else a for a in args)
+        return func(*args, **(kwargs or {}))
+
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
