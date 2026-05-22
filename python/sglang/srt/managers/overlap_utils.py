@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -13,6 +13,40 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
     from sglang.srt.speculative.eagle_info import EagleDraftInput
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+
+class AsyncCpuTensor:
+    """Lazy CPU tensor backed by an in-flight pinned D2H. Any read auto-syncs
+    on the event the first time, then caches. Rationale: a non-consumer
+    never touches the attribute, so the sync only fires for callers who
+    actually need the value.
+
+    `__getattr__` covers tensor methods (`.sum`, `.tolist`, `.shape`, ...);
+    `__getitem__` / `__add__` are dunders Python doesn't route via
+    `__getattr__` and that spec_v2 code paths actually use."""
+
+    __slots__ = ("_pinned_view", "_event", "_resolved")
+
+    def __init__(self, pinned_view: torch.Tensor, event):
+        self._pinned_view = pinned_view
+        self._event = event
+        self._resolved: Optional[torch.Tensor] = None
+
+    def _resolve(self) -> torch.Tensor:
+        if self._resolved is None:
+            self._event.synchronize()
+            self._resolved = self._pinned_view.clone()
+        return self._resolved
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+    def __getitem__(self, idx):
+        return self._resolve()[idx]
+
+    def __add__(self, other):
+        return self._resolve() + other
+
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
@@ -87,6 +121,12 @@ class FutureMap:
         )
         if self.spec_algo.is_some():
             self._forward_buf_initialized = False
+            # Pinned dest for async D2H of new_seq_lens. Reused across iters;
+            # AsyncCpuTensor._resolve() clones off before the next iter
+            # overwrites the live slice.
+            self._seq_lens_cpu_pinned = torch.empty(
+                (self.req_pool_size,), dtype=torch.int64, pin_memory=True
+            )
 
         self.publish_ready = None  # lazy device.Event(); only spec_v2 needs it
 
@@ -154,18 +194,26 @@ class FutureMap:
         batch.input_ids = -future_indices
 
     def resolve_seq_lens_cpu(self, batch: ScheduleBatch) -> None:
-        # Lazy pull from new_seq_lens_buf for spec_v2 (accept_lens not known to
-        # schedule). Write into both CPU and GPU so SB.seq_lens stays a faithful
-        # seq_lens_cpu mirror.
+        # spec_v2 pull of verify-resolved seq_lens. GPU-only fence on
+        # publish_ready + non_blocking D2H to pinned buf — CPU does not block
+        # here. batch.seq_lens_cpu becomes an AsyncCpuTensor; the first reader
+        # transparently syncs via the wrapper.
         fi = batch.spec_info.future_indices if batch.spec_info is not None else None
         if fi is None:
             return
+        device_module = torch.get_device_module(self.device)
+        stream = device_module.current_stream()
         if self.publish_ready is not None:
-            self.publish_ready.wait()
+            stream.wait_event(self.publish_ready)
         new_seq_lens = self.new_seq_lens_buf[fi]
         batch.seq_lens = new_seq_lens
-        batch.seq_lens_cpu = new_seq_lens.cpu()
-        batch.seq_lens_sum = int(batch.seq_lens_cpu.sum())
+        bs = new_seq_lens.shape[0]
+        pinned_view = self._seq_lens_cpu_pinned[:bs]
+        pinned_view.copy_(new_seq_lens, non_blocking=True)
+        evt = device_module.Event()
+        evt.record(stream)
+        batch.seq_lens_cpu = AsyncCpuTensor(pinned_view, evt)
+        batch.seq_lens_sum = None  # forced re-compute via wrapper on demand
 
     def publish(self, future_indices: torch.Tensor, new_seq_lens: torch.Tensor) -> None:
         indices = future_indices
