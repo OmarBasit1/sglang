@@ -15,6 +15,17 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 
+def _resolve_async(x, cls):
+    """Recursively resolve any AsyncCpuTensor inside x (lists / tuples / dicts)."""
+    if isinstance(x, cls):
+        return x._resolve()
+    if isinstance(x, (list, tuple)):
+        return type(x)(_resolve_async(v, cls) for v in x)
+    if isinstance(x, dict):
+        return {k: _resolve_async(v, cls) for k, v in x.items()}
+    return x
+
+
 class AsyncCpuTensor:
     """Lazy CPU tensor over an in-flight pinned D2H — first read syncs on the
     event and caches. Non-consumers never hit the sync."""
@@ -43,10 +54,48 @@ class AsyncCpuTensor:
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        # Wrapper passed into a torch op (e.g. `tensor.copy_(wrapper)`):
-        # resolve every wrapper arg, then forward.
-        args = tuple(a._resolve() if isinstance(a, cls) else a for a in args)
-        return func(*args, **(kwargs or {}))
+        # Wrapper(s) passed into a torch op (`tensor.copy_(wrapper)`,
+        # `torch.cat([wrapper, ...])`, ...): recursively resolve any wrapper
+        # in args / kwargs / nested containers, then forward.
+        args = tuple(_resolve_async(a, cls) for a in args)
+        kwargs = {k: _resolve_async(v, cls) for k, v in (kwargs or {}).items()}
+        return func(*args, **kwargs)
+
+
+class AsyncCpuInt:
+    """Lazy int paired with an AsyncCpuTensor. The sum is computed on first
+    int / arithmetic / equality access. Kept around so backends that read
+    `forward_batch.seq_lens_sum` expecting a Python int stay non-blocking
+    until they actually use it."""
+
+    __slots__ = ("_source", "_resolved")
+
+    def __init__(self, source: AsyncCpuTensor):
+        self._source = source
+        self._resolved: Optional[int] = None
+
+    def _resolve(self) -> int:
+        if self._resolved is None:
+            self._resolved = int(self._source._resolve().sum())
+        return self._resolved
+
+    def __int__(self):
+        return self._resolve()
+
+    def __index__(self):
+        return self._resolve()
+
+    def __add__(self, other):
+        return self._resolve() + other
+
+    def __radd__(self, other):
+        return other + self._resolve()
+
+    def __eq__(self, other):
+        return self._resolve() == other
+
+    def __hash__(self):
+        return hash(self._resolve())
 
 
 _is_cuda = is_cuda()
@@ -209,8 +258,9 @@ class FutureMap:
         pinned_view.copy_(new_seq_lens, non_blocking=True)
         evt = device_module.Event()
         evt.record(stream)
-        batch.seq_lens_cpu = AsyncCpuTensor(pinned_view, evt)
-        batch.seq_lens_sum = None
+        wrapper = AsyncCpuTensor(pinned_view, evt)
+        batch.seq_lens_cpu = wrapper
+        batch.seq_lens_sum = AsyncCpuInt(wrapper)
 
     def publish(self, future_indices: torch.Tensor, new_seq_lens: torch.Tensor) -> None:
         indices = future_indices
