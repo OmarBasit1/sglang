@@ -280,6 +280,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
         num_tokens_per_bs: int,
         dsa_enable_prefill_cp: bool,
         enable_num_token_non_padded_flag: bool,
+        needs_cpu_seq_lens: bool,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ):
         if bs != raw_bs:
@@ -365,10 +366,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
         _grouped_foreach_copy_(dsts, srcs)
 
         # CPU tensor copy (cannot be batched with GPU tensors).
-        if (
-            forward_batch.seq_lens_cpu is not None
-            and self.attn_backend.needs_cpu_seq_lens
-        ):
+        if forward_batch.seq_lens_cpu is not None and needs_cpu_seq_lens:
             if bs != raw_bs:
                 self.seq_lens_cpu.fill_(seq_len_fill_value)
             self.seq_lens_cpu[:raw_bs].copy_(forward_batch.seq_lens_cpu)
@@ -1196,6 +1194,7 @@ class CudaGraphRunner:
             num_tokens_per_bs=self.num_tokens_per_bs,
             dsa_enable_prefill_cp=self.dsa_enable_prefill_cp,
             enable_num_token_non_padded_flag=enable_num_token_non_padded(),
+            needs_cpu_seq_lens=self.attn_backend.needs_cpu_seq_lens,
             pp_proxy_tensors=pp_proxy_tensors,
         )
 
